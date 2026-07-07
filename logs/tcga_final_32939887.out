@@ -1,0 +1,111 @@
+============================================================
+ FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train
+   node:        sh03-15n01.int
+   job:         32939887
+   repo:        /scratch/users/akshatg/stanf_pfm
+   scratch cache (PFM_TCGA_ROOT): /scratch/users/akshatg/stanf_pfm/runtime/tcga
+   node-local staging (L_SCRATCH): /lscratch/akshatg
+   embeddings:  /scratch/users/akshatg/stanf_pfm/runtime/embeddings
+   HF token:    present (runtime/.hf_token)
+   start:       Mon Jul  6 15:48:52 PDT 2026
+============================================================
+
+### STEP 1/5  ensure data-build container + venv
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/tcga_build.sif + /scratch/users/akshatg/stanf_pfm/runtime/venvs/tcga_build
+
+### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)
+  no SVS cache -> stream each slide into node-local ($TMPDIR), thumbnail, evict (nothing large persists)
+INFO: python -m build_tcga_dataset --config configs/tcga_staged.yaml
+  dataset ready: /scratch/users/akshatg/stanf_pfm/runtime/tcga/tables/dataset.csv  (6845 rows)
+
+### STEP 3/5  ensure model container (pfm_base.sif)
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/pfm_base.sif
+
+### STEP 4/5  stage tiles to node-local SSD (/lscratch/akshatg) for the GPU
+  staged 142 thumbnails -> /lscratch/akshatg/thumbnails (PFM_PATCH_DIR points here)
+
+### STEP 5/5  extract across 3 GPU(s) — spec: batch=auto workers=4 amp=default prefetch=default
+
+[1;34m[pfm][0m run: 11 models across 3 GPUs (one model/GPU, waves of 3)
+
+[1;34m[pfm][0m [conch] -> GPU 0
+
+[1;34m[pfm][0m [uni2] -> GPU 1
+
+[1;34m[pfm][0m [virchow] -> GPU 2
+
+[1;34m[pfm][0m === run: conch ===
+
+[1;34m[pfm][0m === run: uni2 ===
+
+[1;34m[pfm][0m === run: virchow ===
+
+[1;34m[pfm][0m [conch] python /scratch/users/akshatg/stanf_pfm/models/conch/conch_spin.py
+
+[1;34m[pfm][0m [uni2] python /scratch/users/akshatg/stanf_pfm/models/uni2/uni2_spin.py
+
+[1;34m[pfm][0m [virchow] python /scratch/users/akshatg/stanf_pfm/models/virchow/virchow_spin.py
+
+[1;34m[pfm][0m [virchow2] -> GPU 0
+
+[1;34m[pfm][0m [titan] -> GPU 1
+
+[1;34m[pfm][0m [gigapath] -> GPU 2
+
+[1;34m[pfm][0m === run: virchow2 ===
+
+[1;34m[pfm][0m === run: titan ===
+
+[1;34m[pfm][0m === run: gigapath ===
+
+[1;34m[pfm][0m [virchow2] python /scratch/users/akshatg/stanf_pfm/models/virchow2/virchow2_spin.py
+
+[1;34m[pfm][0m [titan] python /scratch/users/akshatg/stanf_pfm/models/titan/titan_spin.py
+
+[1;34m[pfm][0m [gigapath] python /scratch/users/akshatg/stanf_pfm/models/gigapath/gigapath_spin.py
+
+[1;34m[pfm][0m [mSTAR] -> GPU 0
+
+[1;34m[pfm][0m [exaone-path] -> GPU 1
+
+[1;34m[pfm][0m [phikon] -> GPU 2
+
+[1;34m[pfm][0m === run: mSTAR ===
+
+
+[1;34m[pfm][0m === run: exaone-path ===
+[1;34m[pfm][0m === run: phikon ===
+
+[1;34m[pfm][0m [mSTAR] python /scratch/users/akshatg/stanf_pfm/models/mSTAR/mSTAR_spin.py
+
+[1;34m[pfm][0m [phikon] python /scratch/users/akshatg/stanf_pfm/models/phikon/phikon_spin.py
+
+[1;34m[pfm][0m [exaone-path] python /scratch/users/akshatg/stanf_pfm/models/exaone-path/exaone-path_spin.py
+
+[1;34m[pfm][0m [h-optimus] -> GPU 0
+
+[1;34m[pfm][0m [hipt] -> GPU 1
+
+[1;34m[pfm][0m === run: h-optimus ===
+
+[1;34m[pfm][0m === run: hipt ===
+
+[1;34m[pfm][0m [hipt] python /scratch/users/akshatg/stanf_pfm/models/hipt/hipt_spin.py
+
+[1;34m[pfm][0m [h-optimus] python /scratch/users/akshatg/stanf_pfm/models/h-optimus/h-optimus_spin.py
+
+[1;34m[pfm][0m run(parallel) done across 3 GPUs (worst rc=0)
+
+  --- benchmark: train a linear probe per (model x task) ---
+
+[1;34m[pfm][0m benchmarking all PFMs across all tasks (venv: /scratch/users/akshatg/stanf_pfm/runtime/venvs/conch)
+  WARN: benchmark returned nonzero (often 'too few labelled samples').
+
+============================================================
+ FINAL SETUP COMPLETE
+   dataset:    /scratch/users/akshatg/stanf_pfm/runtime/tcga/tables/dataset.csv
+   SVS cache:  /scratch/users/akshatg/stanf_pfm/runtime/tcga/slides   (4.0K)
+   embeddings: /scratch/users/akshatg/stanf_pfm/runtime/embeddings/<model>/patch_embeddings.pt
+   results:    /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/results.csv
+   end:        Mon Jul  6 15:49:12 PDT 2026
+============================================================

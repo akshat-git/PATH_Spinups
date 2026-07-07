@@ -1,0 +1,79 @@
+============================================================
+ FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train
+   node:        sh02-13n11.int
+   job:         32926292
+   repo:        /scratch/users/akshatg/stanf_pfm
+   scratch cache (PFM_TCGA_ROOT): /scratch/users/akshatg/stanf_pfm/runtime/tcga_tiled
+   node-local staging (L_SCRATCH): /lscratch/akshatg
+   embeddings:  /scratch/users/akshatg/stanf_pfm/runtime/embeddings_tiled
+   HF token:    present (runtime/.hf_token)
+   start:       Mon Jul  6 13:28:46 PDT 2026
+============================================================
+
+### STEP 1/5  ensure data-build container + venv
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/tcga_build.sif + /scratch/users/akshatg/stanf_pfm/runtime/venvs/tcga_build
+
+### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)
+  no SVS cache -> stream each slide into node-local ($TMPDIR), thumbnail, evict (nothing large persists)
+INFO: python -m build_tcga_dataset --config configs/tcga_tiled.yaml download.target_gb=3
+  dataset ready: /scratch/users/akshatg/stanf_pfm/runtime/tcga_tiled/tables/dataset.csv  (6845 rows)
+
+### STEP 3/5  ensure model container (pfm_base.sif)
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/pfm_base.sif
+
+### STEP 4/5  point the GPU at node-local data (/lscratch/akshatg)
+  patch furnace: 1792 patches in /lscratch/akshatg/tcga_patches (PFM_PATCH_DIR here, batch=64)
+
+### STEP 5/5  extract embeddings (GPU) for all models, then benchmark
+
+[1;34m[pfm][0m === run: conch ===
+
+[1;34m[pfm][0m [conch] python /scratch/users/akshatg/stanf_pfm/models/conch/conch_spin.py
+[conch] device=cuda (uses GPU if available, else CPU).
+[conch] loading model ...
+[conch] model ready.
+[conch] found 1792 images.
+[conch] batch 1 (64 imgs)
+[conch] batch 11 (704 imgs)
+[conch] batch 21 (1344 imgs)
+[conch] saved embeddings (1792, 512) for 1792 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_tiled/conch/patch_embeddings.pt  (192.1s)
+
+[1;34m[pfm][0m [conch] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: uni2 ===
+
+[1;34m[pfm][0m [uni2] python /scratch/users/akshatg/stanf_pfm/models/uni2/uni2_spin.py
+[uni2] device=cuda (uses GPU if available, else CPU).
+[uni2] loading model ...
+[uni2] model ready.
+[uni2] found 1792 images.
+[uni2] batch 1 (64 imgs)
+[uni2] batch 11 (704 imgs)
+[uni2] batch 21 (1344 imgs)
+[uni2] saved embeddings (1792, 1536) for 1792 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_tiled/uni2/patch_embeddings.pt  (206.4s)
+
+[1;34m[pfm][0m [uni2] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow ===
+
+[1;34m[pfm][0m [virchow] python /scratch/users/akshatg/stanf_pfm/models/virchow/virchow_spin.py
+[virchow] device=cuda (uses GPU if available, else CPU).
+[virchow] loading model ...
+[virchow] model ready.
+[virchow] found 1792 images.
+[virchow] batch 1 (64 imgs)
+[virchow] batch 11 (704 imgs)
+[virchow] batch 21 (1344 imgs)
+[virchow] saved embeddings (1792, 2560) for 1792 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_tiled/virchow/patch_embeddings.pt  (227.0s)
+
+[1;34m[pfm][0m [virchow] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow2 ===
+
+[1;34m[pfm][0m [virchow2] python /scratch/users/akshatg/stanf_pfm/models/virchow2/virchow2_spin.py
+[virchow2] device=cuda (uses GPU if available, else CPU).
+[virchow2] loading model ...
+[virchow2] model ready.
+[virchow2] found 1792 images.
+[virchow2] batch 1 (64 imgs)
+[virchow2] batch 11 (704 imgs)

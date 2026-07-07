@@ -1,0 +1,18 @@
+============================================================
+ FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train
+   node:        sh03-15n03.int
+   job:         32922089
+   repo:        /scratch/users/akshatg/stanf_pfm
+   scratch cache (PFM_TCGA_ROOT): /scratch/users/akshatg/stanf_pfm/runtime/tcga_stream3
+   node-local staging (L_SCRATCH): /lscratch/akshatg
+   embeddings:  /scratch/users/akshatg/stanf_pfm/runtime/embeddings_stream3
+   HF token:    present (runtime/.hf_token)
+   start:       Mon Jul  6 11:36:30 PDT 2026
+============================================================
+
+### STEP 1/5  ensure data-build container + venv
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/tcga_build.sif + /scratch/users/akshatg/stanf_pfm/runtime/venvs/tcga_build
+
+### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)
+  no SVS cache -> stream each slide into node-local ($TMPDIR), thumbnail, evict (nothing large persists)
+INFO: python -m build_tcga_dataset --config configs/tcga_staged.yaml download.target_gb=50

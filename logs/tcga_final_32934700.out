@@ -1,0 +1,260 @@
+============================================================
+ FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train
+   node:        sh03-12n03.int
+   job:         32934700
+   repo:        /scratch/users/akshatg/stanf_pfm
+   scratch cache (PFM_TCGA_ROOT): /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu
+   node-local staging (L_SCRATCH): /lscratch/akshatg
+   embeddings:  /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu
+   HF token:    present (runtime/.hf_token)
+   start:       Mon Jul  6 14:35:54 PDT 2026
+============================================================
+
+### STEP 1/5  ensure data-build container + venv
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/tcga_build.sif + /scratch/users/akshatg/stanf_pfm/runtime/venvs/tcga_build
+
+### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)
+  no SVS cache -> stream each slide into node-local ($TMPDIR), thumbnail, evict (nothing large persists)
+INFO: python -m build_tcga_dataset --config configs/tcga_tiled.yaml download.target_gb=3
+  dataset ready: /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu/tables/dataset.csv  (6845 rows)
+
+### STEP 3/5  ensure model container (pfm_base.sif)
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/pfm_base.sif
+
+### STEP 4/5  point the GPU at the patch set
+  patch set: 6000 persisted patches in /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu/patches (PFM_PATCH_DIR here, batch=64, workers=8)
+
+### STEP 5/5  extract embeddings (GPU) for all models, then benchmark
+
+[1;34m[pfm][0m === run: conch ===
+
+[1;34m[pfm][0m [conch] python /scratch/users/akshatg/stanf_pfm/models/conch/conch_spin.py
+[conch] device=cuda (uses GPU if available, else CPU).
+[conch] loading model ...
+[conch] model ready.
+[conch] found 6000 images.
+[conch] batch 1 (64 imgs)
+[conch] batch 11 (704 imgs)
+[conch] batch 21 (1344 imgs)
+[conch] batch 31 (1984 imgs)
+[conch] batch 41 (2624 imgs)
+[conch] batch 51 (3264 imgs)
+[conch] batch 61 (3904 imgs)
+[conch] batch 71 (4544 imgs)
+[conch] batch 81 (5184 imgs)
+[conch] batch 91 (5824 imgs)
+[conch] saved embeddings (6000, 512) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/conch/patch_embeddings.pt  (30.2s)
+
+[1;34m[pfm][0m [conch] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: uni2 ===
+
+[1;34m[pfm][0m [uni2] python /scratch/users/akshatg/stanf_pfm/models/uni2/uni2_spin.py
+[uni2] device=cuda (uses GPU if available, else CPU).
+[uni2] loading model ...
+[uni2] model ready.
+[uni2] found 6000 images.
+[uni2] batch 1 (64 imgs)
+[uni2] batch 11 (704 imgs)
+[uni2] batch 21 (1344 imgs)
+[uni2] batch 31 (1984 imgs)
+[uni2] batch 41 (2624 imgs)
+[uni2] batch 51 (3264 imgs)
+[uni2] batch 61 (3904 imgs)
+[uni2] batch 71 (4544 imgs)
+[uni2] batch 81 (5184 imgs)
+[uni2] batch 91 (5824 imgs)
+[uni2] saved embeddings (6000, 1536) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/uni2/patch_embeddings.pt  (55.6s)
+
+[1;34m[pfm][0m [uni2] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow ===
+
+[1;34m[pfm][0m [virchow] python /scratch/users/akshatg/stanf_pfm/models/virchow/virchow_spin.py
+[virchow] device=cuda (uses GPU if available, else CPU).
+[virchow] loading model ...
+[virchow] model ready.
+[virchow] found 6000 images.
+[virchow] batch 1 (64 imgs)
+[virchow] batch 11 (704 imgs)
+[virchow] batch 21 (1344 imgs)
+[virchow] batch 31 (1984 imgs)
+[virchow] batch 41 (2624 imgs)
+[virchow] batch 51 (3264 imgs)
+[virchow] batch 61 (3904 imgs)
+[virchow] batch 71 (4544 imgs)
+[virchow] batch 81 (5184 imgs)
+[virchow] batch 91 (5824 imgs)
+[virchow] saved embeddings (6000, 2560) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/virchow/patch_embeddings.pt  (54.9s)
+
+[1;34m[pfm][0m [virchow] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow2 ===
+
+[1;34m[pfm][0m [virchow2] python /scratch/users/akshatg/stanf_pfm/models/virchow2/virchow2_spin.py
+[virchow2] device=cuda (uses GPU if available, else CPU).
+[virchow2] loading model ...
+[virchow2] model ready.
+[virchow2] found 6000 images.
+[virchow2] batch 1 (64 imgs)
+[virchow2] batch 11 (704 imgs)
+[virchow2] batch 21 (1344 imgs)
+[virchow2] batch 31 (1984 imgs)
+[virchow2] batch 41 (2624 imgs)
+[virchow2] batch 51 (3264 imgs)
+[virchow2] batch 61 (3904 imgs)
+[virchow2] batch 71 (4544 imgs)
+[virchow2] batch 81 (5184 imgs)
+[virchow2] batch 91 (5824 imgs)
+[virchow2] saved embeddings (6000, 2560) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/virchow2/patch_embeddings.pt  (55.5s)
+
+[1;34m[pfm][0m [virchow2] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: titan ===
+
+[1;34m[pfm][0m [titan] python /scratch/users/akshatg/stanf_pfm/models/titan/titan_spin.py
+[titan] loading model (device=cuda) ...
+
+[1;34m[pfm][0m === run: gigapath ===
+
+[1;34m[pfm][0m [gigapath] python /scratch/users/akshatg/stanf_pfm/models/gigapath/gigapath_spin.py
+[gigapath] device=cuda (uses GPU if available, else CPU).
+[gigapath] loading model ...
+[gigapath] model ready.
+[gigapath] found 6000 images.
+[gigapath] batch 1 (64 imgs)
+[gigapath] batch 11 (704 imgs)
+[gigapath] batch 21 (1344 imgs)
+[gigapath] batch 31 (1984 imgs)
+[gigapath] batch 41 (2624 imgs)
+[gigapath] batch 51 (3264 imgs)
+[gigapath] batch 61 (3904 imgs)
+[gigapath] batch 71 (4544 imgs)
+[gigapath] batch 81 (5184 imgs)
+[gigapath] batch 91 (5824 imgs)
+[gigapath] saved embeddings (6000, 1536) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/gigapath/patch_embeddings.pt  (68.1s)
+
+[1;34m[pfm][0m [gigapath] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: mSTAR ===
+
+[1;34m[pfm][0m [mSTAR] python /scratch/users/akshatg/stanf_pfm/models/mSTAR/mSTAR_spin.py
+[mSTAR] device=cuda (uses GPU if available, else CPU).
+[mSTAR] loading model ...
+[mSTAR] model ready.
+[mSTAR] found 6000 images.
+[mSTAR] batch 1 (64 imgs)
+[mSTAR] batch 11 (704 imgs)
+[mSTAR] batch 21 (1344 imgs)
+[mSTAR] batch 31 (1984 imgs)
+[mSTAR] batch 41 (2624 imgs)
+[mSTAR] batch 51 (3264 imgs)
+[mSTAR] batch 61 (3904 imgs)
+[mSTAR] batch 71 (4544 imgs)
+[mSTAR] batch 81 (5184 imgs)
+[mSTAR] batch 91 (5824 imgs)
+[mSTAR] saved embeddings (6000, 1024) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/mSTAR/patch_embeddings.pt  (21.2s)
+
+[1;34m[pfm][0m [mSTAR] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: exaone-path ===
+
+[1;34m[pfm][0m [exaone-path] python /scratch/users/akshatg/stanf_pfm/models/exaone-path/exaone-path_spin.py
+[exaone-path] device=cuda (uses GPU if available, else CPU).
+[exaone-path] loading model ...
+[exaone-path] model ready.
+[exaone-path] found 6000 images.
+[exaone-path] batch 1 (64 imgs)
+[exaone-path] batch 11 (704 imgs)
+[exaone-path] batch 21 (1344 imgs)
+[exaone-path] batch 31 (1984 imgs)
+[exaone-path] batch 41 (2624 imgs)
+[exaone-path] batch 51 (3264 imgs)
+[exaone-path] batch 61 (3904 imgs)
+[exaone-path] batch 71 (4544 imgs)
+[exaone-path] batch 81 (5184 imgs)
+[exaone-path] batch 91 (5824 imgs)
+[exaone-path] saved embeddings (6000, 768) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/exaone-path/patch_embeddings.pt  (9.4s)
+
+[1;34m[pfm][0m [exaone-path] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: phikon ===
+
+[1;34m[pfm][0m [phikon] python /scratch/users/akshatg/stanf_pfm/models/phikon/phikon_spin.py
+[phikon] device=cuda (uses GPU if available, else CPU).
+[phikon] loading model ...
+[phikon] model ready.
+[phikon] found 6000 images.
+[phikon] batch 1 (64 imgs)
+[phikon] batch 11 (704 imgs)
+[phikon] batch 21 (1344 imgs)
+[phikon] batch 31 (1984 imgs)
+[phikon] batch 41 (2624 imgs)
+[phikon] batch 51 (3264 imgs)
+[phikon] batch 61 (3904 imgs)
+[phikon] batch 71 (4544 imgs)
+[phikon] batch 81 (5184 imgs)
+[phikon] batch 91 (5824 imgs)
+[phikon] saved embeddings (6000, 1024) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/phikon/patch_embeddings.pt  (21.9s)
+
+[1;34m[pfm][0m [phikon] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: h-optimus ===
+
+[1;34m[pfm][0m [h-optimus] python /scratch/users/akshatg/stanf_pfm/models/h-optimus/h-optimus_spin.py
+[h-optimus] device=cuda (uses GPU if available, else CPU).
+[h-optimus] loading model ...
+[h-optimus] ACCESS NOT GRANTED: gated model and the HF token is missing or not approved for it -- disregarding h-optimus. Request access on its Hugging Face page, then re-run.
+[h-optimus] (GatedRepoError: 403 Client Error. (Request ID: Root=1-6a4c2330-5c6c514f659024bf4cc34b38;396b5aab-d999-42c4-9bfe-a849d4f2ee0c)
+
+Cannot access gated repo for url https://huggingface.co/bioptimus/H-optimus-0/resolve/main/config.json.
+Access to model bioptimus/H-optimus-0 is restricted and you are not in the authorized list. Visit https://huggingface.co/bioptimus/H-optimus-0 to ask for access.)
+
+[1;34m[pfm][0m === run: hipt ===
+
+[1;34m[pfm][0m [hipt] python /scratch/users/akshatg/stanf_pfm/models/hipt/hipt_spin.py
+[hipt] device=cuda (uses GPU if available, else CPU).
+[hipt] loading model ...
+Take key teacher in provided checkpoint dict
+Pretrained weights found at /scratch/users/akshatg/stanf_pfm/runtime/repos/HIPT/HIPT_4K/Checkpoints/vit256_small_dino.pth and loaded with msg: _IncompatibleKeys(missing_keys=[], unexpected_keys=['head.mlp.0.weight', 'head.mlp.0.bias', 'head.mlp.2.weight', 'head.mlp.2.bias', 'head.mlp.4.weight', 'head.mlp.4.bias', 'head.last_layer.weight_g', 'head.last_layer.weight_v'])
+[hipt] model ready.
+[hipt] found 6000 images.
+[hipt] batch 1 (64 imgs)
+[hipt] batch 11 (704 imgs)
+[hipt] batch 21 (1344 imgs)
+[hipt] batch 31 (1984 imgs)
+[hipt] batch 41 (2624 imgs)
+[hipt] batch 51 (3264 imgs)
+[hipt] batch 61 (3904 imgs)
+[hipt] batch 71 (4544 imgs)
+[hipt] batch 81 (5184 imgs)
+[hipt] batch 91 (5824 imgs)
+[hipt] saved embeddings (6000, 384) for 6000 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/hipt/patch_embeddings.pt  (6.7s)
+
+[1;34m[pfm][0m [hipt] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m run summary:  OK=[conch uni2 virchow virchow2 gigapath mSTAR exaone-path phikon hipt]  NONZERO=[titan h-optimus]
+
+  --- benchmark: train a linear probe per (model x task) ---
+
+[1;34m[pfm][0m benchmarking all PFMs across all tasks (venv: /scratch/users/akshatg/stanf_pfm/runtime/venvs/conch)
+[bench] models: ['conch', 'exaone-path', 'gigapath', 'hipt', 'mSTAR', 'phikon', 'uni2', 'virchow', 'virchow2']
+[bench] tasks : ['luad_vs_lusc', 'lgg_vs_gbm', 'kras', 'tp53', 'egfr', 'idh']
+[bench] labels: /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu/tables/dataset.csv
+
+[bench] task luad_vs_lusc: no labelled rows in dataset.csv -- skipping task.
+[bench] task lgg_vs_gbm: no labelled rows in dataset.csv -- skipping task.
+[bench] task kras: no labelled rows in dataset.csv -- skipping task.
+[bench] task tp53: no labelled rows in dataset.csv -- skipping task.
+[bench] task egfr: no labelled rows in dataset.csv -- skipping task.
+[bench] task idh: no labelled rows in dataset.csv -- skipping task.
+  WARN: benchmark returned nonzero (often 'too few labelled samples').
+
+============================================================
+ FINAL SETUP COMPLETE
+   dataset:    /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu/tables/dataset.csv
+   SVS cache:  /scratch/users/akshatg/stanf_pfm/runtime/tcga_otsu/slides   (4.0K)
+   embeddings: /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/<model>/patch_embeddings.pt
+   results:    /scratch/users/akshatg/stanf_pfm/runtime/embeddings_otsu/benchmark/results.csv
+   end:        Mon Jul  6 14:51:05 PDT 2026
+============================================================

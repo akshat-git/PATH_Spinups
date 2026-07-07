@@ -1,0 +1,22 @@
+11:36:36 | INFO     | tcga.pipeline | Pipeline steps: ['etl', 'manifest', 'stage_process', 'download', 'gene_matrix', 'assemble']
+11:36:36 | INFO     | tcga.pipeline | Projects: ['TCGA-LUAD', 'TCGA-LUSC', 'TCGA-LGG', 'TCGA-GBM']
+11:36:36 | INFO     | tcga.pipeline | Data dir: /tcga_data
+11:36:36 | INFO     | tcga.pipeline | ============================================================
+11:36:36 | INFO     | tcga.pipeline | STEP: etl
+11:36:36 | INFO     | tcga.pipeline | ============================================================
+11:37:10 | INFO     | tcga.pipeline | Slide table: 6845 rows, 36 columns
+11:37:11 | INFO     | tcga.pipeline | Saved slide table → /tcga_data/tables/slide_table.parquet
+11:37:11 | INFO     | tcga.pipeline | ============================================================
+11:37:11 | INFO     | tcga.pipeline | STEP: manifest
+11:37:11 | INFO     | tcga.pipeline | ============================================================
+11:37:11 | INFO     | tcga.pipeline | Slide manifest → /tcga_data/manifests/slides_manifest.txt
+11:37:11 | INFO     | tcga.pipeline | MAF manifest   → /tcga_data/manifests/maf_manifest.txt
+11:37:11 | INFO     | tcga.pipeline | Stratified subset: 142 slides across projects {'TCGA-GBM': 36, 'TCGA-LGG': 36, 'TCGA-LUAD': 35, 'TCGA-LUSC': 35}
+11:37:11 | INFO     | tcga.pipeline | Subset slide manifest (142 files) → /tcga_data/manifests/slides_manifest_subset.txt
+11:37:11 | INFO     | tcga.pipeline | Subset MAF manifest (for the 142 subset slides) → /tcga_data/manifests/maf_manifest_subset.txt
+11:37:11 | INFO     | tcga.pipeline | ============================================================
+11:37:11 | INFO     | tcga.pipeline | STEP: stage_process
+11:37:11 | INFO     | tcga.pipeline | ============================================================
+11:37:12 | INFO     | tcga.pipeline | Staged subset: 142 slides (~50.6 GB) across {'TCGA-GBM': 36, 'TCGA-LGG': 36, 'TCGA-LUAD': 35, 'TCGA-LUSC': 35}
+11:37:12 | INFO     | tcga.pipeline | stage_process mode: stream-to-local (no persistent SVS cache)
+[2026-07-06T11:49:51.303] error: *** JOB 32922089 ON sh03-15n03 CANCELLED AT 2026-07-06T11:49:51 DUE to SIGNAL Terminated ***

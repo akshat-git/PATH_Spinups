@@ -1,0 +1,278 @@
+============================================================
+ FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train
+   node:        sh03-15n05.int
+   job:         32930938
+   repo:        /scratch/users/akshatg/stanf_pfm
+   scratch cache (PFM_TCGA_ROOT): /scratch/users/akshatg/stanf_pfm/runtime/tcga
+   node-local staging (L_SCRATCH): /lscratch/akshatg
+   embeddings:  /scratch/users/akshatg/stanf_pfm/runtime/embeddings
+   HF token:    present (runtime/.hf_token)
+   start:       Mon Jul  6 13:49:16 PDT 2026
+============================================================
+
+### STEP 1/5  ensure data-build container + venv
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/tcga_build.sif + /scratch/users/akshatg/stanf_pfm/runtime/venvs/tcga_build
+
+### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)
+  no SVS cache -> stream each slide into node-local ($TMPDIR), thumbnail, evict (nothing large persists)
+INFO: python -m build_tcga_dataset --config configs/tcga_staged.yaml
+  dataset ready: /scratch/users/akshatg/stanf_pfm/runtime/tcga/tables/dataset.csv  (6845 rows)
+
+### STEP 3/5  ensure model container (pfm_base.sif)
+  present: /scratch/users/akshatg/stanf_pfm/runtime/containers/pfm_base.sif
+
+### STEP 4/5  point the GPU at node-local data (/lscratch/akshatg)
+  staged 142 thumbnails -> /lscratch/akshatg/thumbnails (PFM_PATCH_DIR points here)
+
+### STEP 5/5  extract embeddings (GPU) for all models, then benchmark
+
+[1;34m[pfm][0m === run: conch ===
+
+[1;34m[pfm][0m [conch] python /scratch/users/akshatg/stanf_pfm/models/conch/conch_spin.py
+[conch] device=cuda (uses GPU if available, else CPU).
+[conch] loading model ...
+[conch] model ready.
+[conch] found 142 images.
+[conch] batch 1 (8 imgs)
+[conch] batch 11 (88 imgs)
+[conch] saved embeddings (142, 512) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/conch/patch_embeddings.pt  (2.4s)
+
+[1;34m[pfm][0m [conch] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: uni2 ===
+
+[1;34m[pfm][0m [uni2] python /scratch/users/akshatg/stanf_pfm/models/uni2/uni2_spin.py
+[uni2] device=cuda (uses GPU if available, else CPU).
+[uni2] loading model ...
+[uni2] model ready.
+[uni2] found 142 images.
+[uni2] batch 1 (8 imgs)
+[uni2] batch 11 (88 imgs)
+[uni2] saved embeddings (142, 1536) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/uni2/patch_embeddings.pt  (2.7s)
+
+[1;34m[pfm][0m [uni2] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow ===
+
+[1;34m[pfm][0m [virchow] python /scratch/users/akshatg/stanf_pfm/models/virchow/virchow_spin.py
+[virchow] device=cuda (uses GPU if available, else CPU).
+[virchow] loading model ...
+[virchow] model ready.
+[virchow] found 142 images.
+[virchow] batch 1 (8 imgs)
+[virchow] batch 11 (88 imgs)
+[virchow] saved embeddings (142, 2560) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/virchow/patch_embeddings.pt  (2.5s)
+
+[1;34m[pfm][0m [virchow] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: virchow2 ===
+
+[1;34m[pfm][0m [virchow2] python /scratch/users/akshatg/stanf_pfm/models/virchow2/virchow2_spin.py
+[virchow2] device=cuda (uses GPU if available, else CPU).
+[virchow2] loading model ...
+[virchow2] model ready.
+[virchow2] found 142 images.
+[virchow2] batch 1 (8 imgs)
+[virchow2] batch 11 (88 imgs)
+[virchow2] saved embeddings (142, 2560) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/virchow2/patch_embeddings.pt  (2.7s)
+
+[1;34m[pfm][0m [virchow2] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: titan ===
+
+[1;34m[pfm][0m [titan] python /scratch/users/akshatg/stanf_pfm/models/titan/titan_spin.py
+[titan] loading model (device=cuda) ...
+
+[1;34m[pfm][0m === run: gigapath ===
+
+[1;34m[pfm][0m [gigapath] python /scratch/users/akshatg/stanf_pfm/models/gigapath/gigapath_spin.py
+[gigapath] device=cuda (uses GPU if available, else CPU).
+[gigapath] loading model ...
+[gigapath] model ready.
+[gigapath] found 142 images.
+[gigapath] batch 1 (8 imgs)
+[gigapath] batch 11 (88 imgs)
+[gigapath] saved embeddings (142, 1536) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/gigapath/patch_embeddings.pt  (3.0s)
+
+[1;34m[pfm][0m [gigapath] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: mSTAR ===
+
+[1;34m[pfm][0m [mSTAR] python /scratch/users/akshatg/stanf_pfm/models/mSTAR/mSTAR_spin.py
+[mSTAR] device=cuda (uses GPU if available, else CPU).
+[mSTAR] loading model ...
+[mSTAR] model ready.
+[mSTAR] found 142 images.
+[mSTAR] batch 1 (8 imgs)
+[mSTAR] batch 11 (88 imgs)
+[mSTAR] saved embeddings (142, 1024) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/mSTAR/patch_embeddings.pt  (1.8s)
+
+[1;34m[pfm][0m [mSTAR] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: exaone-path ===
+
+[1;34m[pfm][0m [exaone-path] python /scratch/users/akshatg/stanf_pfm/models/exaone-path/exaone-path_spin.py
+[exaone-path] device=cuda (uses GPU if available, else CPU).
+[exaone-path] loading model ...
+[exaone-path] model ready.
+[exaone-path] found 142 images.
+[exaone-path] batch 1 (8 imgs)
+[exaone-path] batch 11 (88 imgs)
+[exaone-path] saved embeddings (142, 768) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/exaone-path/patch_embeddings.pt  (1.6s)
+
+[1;34m[pfm][0m [exaone-path] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: phikon ===
+
+[1;34m[pfm][0m [phikon] python /scratch/users/akshatg/stanf_pfm/models/phikon/phikon_spin.py
+[phikon] device=cuda (uses GPU if available, else CPU).
+[phikon] loading model ...
+[phikon] model ready.
+[phikon] found 142 images.
+[phikon] batch 1 (8 imgs)
+[phikon] batch 11 (88 imgs)
+[phikon] saved embeddings (142, 1024) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/phikon/patch_embeddings.pt  (2.0s)
+
+[1;34m[pfm][0m [phikon] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m === run: h-optimus ===
+
+[1;34m[pfm][0m [h-optimus] python /scratch/users/akshatg/stanf_pfm/models/h-optimus/h-optimus_spin.py
+[h-optimus] device=cuda (uses GPU if available, else CPU).
+[h-optimus] loading model ...
+[h-optimus] ACCESS NOT GRANTED: gated model and the HF token is missing or not approved for it -- disregarding h-optimus. Request access on its Hugging Face page, then re-run.
+[h-optimus] (GatedRepoError: 403 Client Error. (Request ID: Root=1-6a4c15c8-141f7d0c2d899fe15aa7245a;fef9af8d-9546-4ce4-ac40-7efbe4443c4e)
+
+Cannot access gated repo for url https://huggingface.co/bioptimus/H-optimus-0/resolve/main/config.json.
+Access to model bioptimus/H-optimus-0 is restricted and you are not in the authorized list. Visit https://huggingface.co/bioptimus/H-optimus-0 to ask for access.)
+
+[1;34m[pfm][0m === run: hipt ===
+
+[1;34m[pfm][0m [hipt] python /scratch/users/akshatg/stanf_pfm/models/hipt/hipt_spin.py
+[hipt] device=cuda (uses GPU if available, else CPU).
+[hipt] loading model ...
+Take key teacher in provided checkpoint dict
+Pretrained weights found at /scratch/users/akshatg/stanf_pfm/runtime/repos/HIPT/HIPT_4K/Checkpoints/vit256_small_dino.pth and loaded with msg: _IncompatibleKeys(missing_keys=[], unexpected_keys=['head.mlp.0.weight', 'head.mlp.0.bias', 'head.mlp.2.weight', 'head.mlp.2.bias', 'head.mlp.4.weight', 'head.mlp.4.bias', 'head.last_layer.weight_g', 'head.last_layer.weight_v'])
+[hipt] model ready.
+[hipt] found 142 images.
+[hipt] batch 1 (8 imgs)
+[hipt] batch 11 (88 imgs)
+[hipt] saved embeddings (142, 384) for 142 images -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/hipt/patch_embeddings.pt  (2.0s)
+
+[1;34m[pfm][0m [hipt] run finished cleanly (exit 0).
+
+[1;34m[pfm][0m run summary:  OK=[conch uni2 virchow virchow2 gigapath mSTAR exaone-path phikon hipt]  NONZERO=[titan h-optimus]
+
+  --- benchmark: train a linear probe per (model x task) ---
+
+[1;34m[pfm][0m benchmarking all PFMs across all tasks (venv: /scratch/users/akshatg/stanf_pfm/runtime/venvs/conch)
+[bench] models: ['conch', 'exaone-path', 'gigapath', 'hipt', 'mSTAR', 'phikon', 'uni2', 'virchow', 'virchow2']
+[bench] tasks : ['luad_vs_lusc', 'lgg_vs_gbm', 'kras', 'tp53', 'egfr', 'idh']
+[bench] labels: /scratch/users/akshatg/stanf_pfm/runtime/tcga/tables/dataset.csv
+
+[bench] === task luad_vs_lusc  (70 labelled slides, classes=['LUAD', 'LUSC']) ===
+[bench]   conch          n=   70  acc=0.643  bal_acc=0.643  f1=0.641  auroc=0.592
+[bench]   exaone-path    n=   70  acc=0.500  bal_acc=0.500  f1=0.497  auroc=0.510
+[bench]   gigapath       n=   70  acc=0.500  bal_acc=0.500  f1=0.497  auroc=0.510
+[bench]   hipt           n=   70  acc=0.571  bal_acc=0.571  f1=0.533  auroc=0.510
+[bench]   mSTAR          n=   70  acc=0.357  bal_acc=0.357  f1=0.354  auroc=0.367
+[bench]   phikon         n=   70  acc=0.714  bal_acc=0.714  f1=0.708  auroc=0.776
+[bench]   uni2           n=   70  acc=0.500  bal_acc=0.500  f1=0.497  auroc=0.592
+[bench]   virchow        n=   70  acc=0.714  bal_acc=0.714  f1=0.708  auroc=0.735
+[bench]   virchow2       n=   70  acc=0.643  bal_acc=0.643  f1=0.641  auroc=0.571
+
+[bench] === task lgg_vs_gbm  (72 labelled slides, classes=['LGG', 'GBM']) ===
+[bench]   conch          n=   72  acc=0.714  bal_acc=0.714  f1=0.714  auroc=0.735
+[bench]   exaone-path    n=   72  acc=0.714  bal_acc=0.714  f1=0.714  auroc=0.816
+[bench]   gigapath       n=   72  acc=0.500  bal_acc=0.500  f1=0.497  auroc=0.653
+[bench]   hipt           n=   72  acc=0.714  bal_acc=0.714  f1=0.714  auroc=0.837
+[bench]   mSTAR          n=   72  acc=0.714  bal_acc=0.714  f1=0.714  auroc=0.816
+[bench]   phikon         n=   72  acc=0.786  bal_acc=0.786  f1=0.785  auroc=0.837
+[bench]   uni2           n=   72  acc=0.714  bal_acc=0.714  f1=0.708  auroc=0.735
+[bench]   virchow        n=   72  acc=0.857  bal_acc=0.857  f1=0.857  auroc=0.857
+[bench]   virchow2       n=   72  acc=0.786  bal_acc=0.786  f1=0.785  auroc=0.898
+
+[bench] === task kras  (79 labelled slides, classes=['KRAS-wt', 'KRAS-mut']) ===
+[bench]   conch          n=   79  acc=0.750  bal_acc=0.867  f1=0.590  auroc=1.000
+[bench]   exaone-path    n=   79  acc=0.625  bal_acc=0.800  f1=0.500  auroc=0.933
+[bench]   gigapath       n=   79  acc=0.750  bal_acc=0.867  f1=0.590  auroc=0.733
+[bench]   hipt           n=   79  acc=0.625  bal_acc=0.800  f1=0.500  auroc=0.867
+[bench]   mSTAR          n=   79  acc=0.750  bal_acc=0.867  f1=0.590  auroc=1.000
+[bench]   phikon         n=   79  acc=0.625  bal_acc=0.800  f1=0.500  auroc=0.933
+[bench]   uni2           n=   79  acc=0.625  bal_acc=0.800  f1=0.500  auroc=0.933
+[bench]   virchow        n=   79  acc=0.812  bal_acc=0.900  f1=0.644  auroc=0.800
+[bench]   virchow2       n=   79  acc=0.562  bal_acc=0.767  f1=0.459  auroc=1.000
+
+[bench] === task tp53  (79 labelled slides, classes=['TP53-wt', 'TP53-mut']) ===
+[bench]   conch          n=   79  acc=0.750  bal_acc=0.767  f1=0.746  auroc=0.683
+[bench]   exaone-path    n=   79  acc=0.500  bal_acc=0.500  f1=0.492  auroc=0.617
+[bench]   gigapath       n=   79  acc=0.625  bal_acc=0.633  f1=0.619  auroc=0.633
+[bench]   hipt           n=   79  acc=0.688  bal_acc=0.650  f1=0.654  auroc=0.767
+[bench]   mSTAR          n=   79  acc=0.625  bal_acc=0.600  f1=0.600  auroc=0.650
+[bench]   phikon         n=   79  acc=0.562  bal_acc=0.583  f1=0.561  auroc=0.567
+[bench]   uni2           n=   79  acc=0.688  bal_acc=0.617  f1=0.614  auroc=0.683
+[bench]   virchow        n=   79  acc=0.625  bal_acc=0.633  f1=0.619  auroc=0.817
+[bench]   virchow2       n=   79  acc=0.625  bal_acc=0.633  f1=0.619  auroc=0.817
+
+[bench] === task egfr  (79 labelled slides, classes=['EGFR-wt', 'EGFR-mut']) ===
+[bench]   conch          n=   79  acc=0.500  bal_acc=0.500  f1=0.418  auroc=0.607
+[bench]   exaone-path    n=   79  acc=0.750  bal_acc=0.429  f1=0.429  auroc=0.500
+[bench]   gigapath       n=   79  acc=0.625  bal_acc=0.357  f1=0.385  auroc=0.607
+[bench]   hipt           n=   79  acc=0.375  bal_acc=0.214  f1=0.273  auroc=0.250
+[bench]   mSTAR          n=   79  acc=0.625  bal_acc=0.786  f1=0.564  auroc=0.643
+[bench]   phikon         n=   79  acc=0.750  bal_acc=0.429  f1=0.429  auroc=0.821
+[bench]   uni2           n=   79  acc=0.875  bal_acc=0.929  f1=0.795  auroc=0.929
+[bench]   virchow        n=   79  acc=0.688  bal_acc=0.393  f1=0.407  auroc=0.143
+[bench]   virchow2       n=   79  acc=0.750  bal_acc=0.643  f1=0.590  auroc=0.536
+
+[bench] === task idh  (79 labelled slides, classes=['IDH-wt', 'IDH-mut']) ===
+[bench]   conch          skipped: only one class present ({0})
+[bench]   exaone-path    skipped: only one class present ({0})
+[bench]   gigapath       skipped: only one class present ({0})
+[bench]   hipt           skipped: only one class present ({0})
+[bench]   mSTAR          skipped: only one class present ({0})
+[bench]   phikon         skipped: only one class present ({0})
+[bench]   uni2           skipped: only one class present ({0})
+[bench]   virchow        skipped: only one class present ({0})
+[bench]   virchow2       skipped: only one class present ({0})
+
+[bench] wrote 45 (model, task) results
+[bench]   table -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/results.csv
+[bench]   detail-> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/results.json
+[bench] compare/plot:  python -m pfm_common.plot_results --results /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/results.csv
+
+=== auroc : model x task ===
+                      egfr        kras  lgg_vs_gbm luad_vs_lus        tp53        mean
+--------------------------------------------------------------------------------------
+phikon               0.821       0.933       0.837       0.776       0.567       0.787
+uni2                 0.929       0.933       0.735       0.592       0.683       0.774
+virchow2             0.536       1.000       0.898       0.571       0.817       0.764
+conch                0.607       1.000       0.735       0.592       0.683       0.723
+mSTAR                0.643       1.000       0.816       0.367       0.650       0.695
+exaone-path          0.500       0.933       0.816       0.510       0.617       0.675
+virchow              0.143       0.800       0.857       0.735       0.817       0.670
+hipt                 0.250       0.867       0.837       0.510       0.767       0.646
+gigapath             0.607       0.733       0.653       0.510       0.633       0.627
+
+=== leaderboard (mean auroc across tasks) ===
+   1. phikon           0.787
+   2. uni2             0.774
+   3. virchow2         0.764
+   4. conch            0.723
+   5. mSTAR            0.695
+   6. exaone-path      0.675
+   7. virchow          0.670
+   8. hipt             0.646
+   9. gigapath         0.627
+
+[plot] summary table -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/summary_auroc.csv
+[plot] heatmap       -> /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/heatmap_auroc.png
+
+============================================================
+ FINAL SETUP COMPLETE
+   dataset:    /scratch/users/akshatg/stanf_pfm/runtime/tcga/tables/dataset.csv
+   SVS cache:  /scratch/users/akshatg/stanf_pfm/runtime/tcga/slides   (4.0K)
+   embeddings: /scratch/users/akshatg/stanf_pfm/runtime/embeddings/<model>/patch_embeddings.pt
+   results:    /scratch/users/akshatg/stanf_pfm/runtime/embeddings/benchmark/results.csv
+   end:        Mon Jul  6 13:54:05 PDT 2026
+============================================================

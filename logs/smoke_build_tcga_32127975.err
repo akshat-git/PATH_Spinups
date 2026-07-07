@@ -1,0 +1,6 @@
+mkdir: cannot create directory ‘/var/spool/runtime’: Permission denied
+mkdir: cannot create directory ‘/var/spool/runtime’: Permission denied
+mkdir: cannot create directory ‘/var/spool/runtime’: Permission denied
+mkdir: cannot create directory ‘/var/spool/runtime’: Permission denied
+mkdir: cannot create directory ‘/var/spool/slurmd/logs’: Permission denied
+bash: jobs/setup_tcga.sh: No such file or directory

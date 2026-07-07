@@ -1,0 +1,16 @@
+============================================================
+ SMOKE: real 5-slide TCGA -> model -> probe
+   node:        sh04-14n28.int
+   job:         32318586
+   repo:        /var/spool
+   tcga data:   /var/spool/runtime/smoke/tcga
+   embeddings:  /var/spool/runtime/smoke/embeddings
+   slides:      5      model: phikon
+   start:       Wed Jul  1 10:34:44 PDT 2026
+============================================================
+
+### STEP 0/4  ensure CPU data-build container + venv
+  missing -> running jobs/setup_tcga.sh (pull python:3.10-slim + build venv)
+
+SMOKE FAILED at: data-build setup (jobs/setup_tcga.sh)
+=== end: Wed Jul  1 10:34:44 PDT 2026 ===
