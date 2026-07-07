@@ -1,0 +1,56 @@
+# ── TCGA Final Setup — full-SVS staged loading ───────────────────────────────
+# Thumbnails a stratified ~50 GB (~10% of the corpus) subset of FULL SVS slides.
+# With download.stream_to_local: true (the default here) each SVS is STREAMED
+# straight into a node-local ($L_SCRATCH / $TMPDIR) staging area, thumbnailed with
+# openslide there, then EVICTED -- so no ~50 GB of raw SVS ever persists; only the
+# tiny thumbnails are written to $SCRATCH. Downloads + thumbnailing overlap (async)
+# and everything is resumable: already-thumbnailed slides are skipped, so re-runs
+# are fast WITHOUT depending on a pre-downloaded SVS cache.
+# (Set stream_to_local: false for the alternative two-tier resident-SVS cache.)
+#
+# Used by: jobs/final_setup.sh
+#   python -m build_tcga_dataset --config configs/tcga_staged.yaml
+
+projects:
+  - TCGA-LUAD
+  - TCGA-LUSC
+  - TCGA-LGG
+  - TCGA-GBM
+
+data_dir: /tcga_data
+access: open
+
+etl:
+  include_demographics: true
+  include_diagnosis: true
+  include_maf: true
+
+download:
+  enabled: true
+  slides: false             # slides handled by stage_process (SVS streamed via node-local)
+  maf: true                 # MAF still downloaded (small); subset aligned to the staged slides
+  token_path: null
+  n_processes: 8
+  target_gb: 50             # size budget for the stratified full-SVS subset (~10% of TCGA)
+  max_files: null           # set this (a slide count) INSTEAD of target_gb to cap by count
+  stream_to_local: true     # stream each SVS into node-local $TMPDIR, thumbnail, evict --
+                            # no persistent ~50 GB scratch cache; only thumbnails persist.
+                            # set false for the two-tier resident-SVS cache instead.
+
+slides:
+  thumbnail_size: [512, 512]
+  n_workers: 8
+  stage_download_workers: 6 # concurrent SVS download+stage workers (bounds node-local disk)
+
+gene_matrix:
+  enabled: true
+  genes: ["KRAS","TP53","EGFR","IDH"]
+
+# stage_process = cache full SVS on scratch + node-local staged thumbnailing.
+steps:
+  - etl
+  - manifest
+  - stage_process
+  - download
+  - gene_matrix
+  - assemble

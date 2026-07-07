@@ -1,0 +1,69 @@
+# ── TCGA Patch-Tiled loading (GPU-bound) ─────────────────────────────────────
+# Instead of one thumbnail per slide, TILE each full SVS into many tissue patches.
+# Each SVS is streamed into node-local $TMPDIR (or reused from a pre-downloaded
+# $SCRATCH cache), cut into patches under a node-local patches dir (the "furnace"),
+# then the SVS is evicted. Extraction runs GPU-bound over the patches; benchmark.py
+# mean-pools each slide's patches back to a slide-level vector for the linear probe.
+#
+# Used by: FINAL_CONFIG=configs/tcga_tiled.yaml sbatch jobs/final_setup.sh
+#   (final_setup STEP 4 auto-detects the node-local patch furnace and sets batch=64)
+
+projects:
+  - TCGA-LUAD
+  - TCGA-LUSC
+  - TCGA-LGG
+  - TCGA-GBM
+
+data_dir: /tcga_data
+access: open
+
+etl:
+  include_demographics: true
+  include_diagnosis: true
+  include_maf: true
+
+download:
+  enabled: true
+  slides: false             # slides handled by tile_slides (stream/reuse, not bulk download)
+  maf: true                 # MAF still downloaded (small); labels aligned to the tiled slides
+  token_path: null
+  n_processes: 8
+  target_gb: 50             # stratified full-SVS subset to tile (~10% of TCGA)
+  max_files: null           # set a slide COUNT instead of target_gb to cap by count
+  stream_to_local: true     # stream each SVS into node-local, tile, evict; reuse cache if present
+
+patches:
+  patch_size: 256           # px per patch at `level` (each model's transform resizes to its own input)
+  level: 0                  # openslide level to tile at (0 = native/highest res)
+  tissue_thresh: 0.10       # min fraction of Otsu-tissue pixels in a cell to keep it
+                            # No cap: EVERY Otsu-tissue cell is tiled (full slide coverage).
+                            # Count is data-driven; tiling persists once to $TCGA/patches.
+                            # Total is large (hundreds/thousands/slide) -> heavily GPU-bound.
+  thumb_max_dim: 2048       # downsample dim for the Otsu tissue-mask thumbnail
+  jpeg_quality: 85          # saved patch JPEG quality
+  # patches_dir: null       # default: $PFM_TCGA_ROOT/patches (persistent on scratch)
+
+# Compute / extraction spec -- jobs/final_setup.sh reads these and exports them as
+# PFM_BATCH_SIZE / PFM_NUM_WORKERS / PFM_AMP_DTYPE for the GPU run. Nothing hardcoded.
+compute:
+  batch_size: 128           # patches per forward batch (V100 is overhead-bound below ~128)
+  num_workers: auto         # auto = cpus-per-task / gpus; or an integer
+  amp_dtype: auto           # auto (bf16 if the GPU supports it, else fp16) | float16 | bfloat16 | float32
+  prefetch_factor: 4        # DataLoader batches prefetched per worker (H2D overlap)
+
+slides:
+  n_workers: 8
+  stage_download_workers: 6 # concurrent SVS download+tile workers
+
+gene_matrix:
+  enabled: true
+  genes: ["KRAS","TP53","EGFR","IDH"]
+
+# tile_slides replaces stage_process: stream/reuse SVS -> tissue patches (node-local).
+steps:
+  - etl
+  - manifest
+  - tile_slides
+  - download
+  - gene_matrix
+  - assemble
