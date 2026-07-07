@@ -1,0 +1,129 @@
+"""The shared extraction loop. A model adapter calls run_patch_encoder() with two
+callbacks; everything below (auth, data, batching, autocast, saving) is reused.
+"""
+import os
+import time
+
+from . import config, data, hf_auth
+
+# Exit code the runner uses when a gated model can't be accessed (token missing or
+# not approved). Distinct from a normal error so callers can disregard the model.
+NO_ACCESS_EXIT = 75
+
+
+def _resolve_amp(dev):
+    """(enabled, dtype) for autocast, driven by config.AMP_DTYPE (the spec) -- not
+    hardcoded. 'auto' picks bf16 on GPUs that support it (Ampere+), else fp16 (e.g.
+    V100); 'float32'/'off' disables autocast. CPU always uses bf16 autocast."""
+    import torch
+
+    sel = str(getattr(config, "AMP_DTYPE", "auto")).lower()
+    if dev != "cuda":
+        return True, torch.bfloat16
+    if sel in ("float32", "fp32", "off", "none", "disable"):
+        return False, torch.float32
+    if sel in ("bf16", "bfloat16"):
+        return True, torch.bfloat16
+    if sel in ("fp16", "float16", "half"):
+        return True, torch.float16
+    # auto: prefer bf16 where the hardware supports it natively, else fp16
+    try:
+        supports_bf16 = torch.cuda.is_bf16_supported()
+    except Exception:
+        supports_bf16 = False
+    return True, (torch.bfloat16 if supports_bf16 else torch.float16)
+
+
+def _is_access_error(exc):
+    """True when an exception looks like a gated / unauthorized HF repo access denial."""
+    txt = f"{type(exc).__name__}: {exc}"
+    markers = (
+        "GatedRepoError", "401", "403", "gated repo", "restricted",
+        "authorized list", "Access to model", "awaiting", "must be authenticated",
+        "No HF token found", "Cannot access gated repo",
+    )
+    return any(m in txt for m in markers)
+
+
+def run_patch_encoder(name, load_fn, embed_fn, gated=False):
+    """Run a patch-level foundation model over TCGA patches and save embeddings.
+
+    name      : short model name, used for the output subdirectory.
+    load_fn   : () -> (model, transform)  where transform maps PIL.Image -> Tensor[C,H,W].
+    embed_fn  : (model, batch_tensor) -> Tensor[B, D]  (batch already on device).
+    gated     : if True, require an HF token before attempting the download.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    dev = config.device()
+    print(f"[{name}] device={dev} (uses GPU if available, else CPU).", flush=True)
+    # Load weights, but treat a gated / unauthorized HF repo as "access not granted"
+    # rather than a hard failure: print a clear message and exit 75 so the caller can
+    # disregard this model instead of counting it as a bug.
+    try:
+        hf_auth.login_hf(required=gated)
+        print(f"[{name}] loading model ...", flush=True)
+        model, transform = load_fn()
+    except SystemExit:
+        raise
+    except Exception as e:
+        if _is_access_error(e):
+            print(
+                f"[{name}] ACCESS NOT GRANTED: gated model and the HF token is missing or "
+                f"not approved for it -- disregarding {name}. Request access on its Hugging "
+                f"Face page, then re-run.\n[{name}] ({type(e).__name__}: {e})",
+                flush=True,
+            )
+            raise SystemExit(75)
+        raise
+    model = model.eval().to(dev)
+    print(f"[{name}] model ready.", flush=True)
+
+    imgs = data.find_patch_images()
+    if not imgs:
+        print(
+            f"[{name}] Model + weights loaded OK, but no TCGA patch images were found.\n"
+            f"[{name}] Searched:\n{data.describe_sources()}"
+            f"[{name}] Stage tiles and set PFM_PATCH_DIR=/path/to/patches, then re-run.",
+            flush=True,
+        )
+        return None
+    print(f"[{name}] found {len(imgs)} images.", flush=True)
+
+    ds = data.make_dataset(imgs, transform)
+    dl_kwargs = dict(
+        batch_size=config.BATCH_SIZE,
+        num_workers=config.NUM_WORKERS,
+        collate_fn=data.collate,
+        pin_memory=(dev == "cuda"),
+    )
+    if config.NUM_WORKERS > 0 and config.PREFETCH_FACTOR > 0:
+        dl_kwargs["prefetch_factor"] = config.PREFETCH_FACTOR   # stage batches ahead (H2D overlap)
+    loader = DataLoader(ds, **dl_kwargs)
+
+    feats, ids = [], []
+    amp_enabled, amp_dtype = _resolve_amp(dev)
+    print(f"[{name}] batch={config.BATCH_SIZE} workers={config.NUM_WORKERS} "
+          f"autocast={'off' if not amp_enabled else amp_dtype}", flush=True)
+    t0 = time.time()
+    for bi, (batch, paths) in enumerate(loader):
+        batch = batch.to(dev, non_blocking=True)
+        with torch.inference_mode():
+            with torch.autocast(device_type=dev, dtype=amp_dtype, enabled=amp_enabled):
+                out = embed_fn(model, batch)
+        feats.append(out.float().cpu())
+        ids.extend(paths)
+        if bi % 10 == 0:
+            print(f"[{name}] batch {bi+1} ({len(ids)} imgs)", flush=True)
+
+    embeddings = torch.cat(feats, 0)
+    out_dir = config.output_dir_for(name)
+    out_path = os.path.join(out_dir, "patch_embeddings.pt")
+    torch.save({"model": name, "embeddings": embeddings, "paths": ids}, out_path)
+    print(
+        f"[{name}] saved embeddings {tuple(embeddings.shape)} for {len(ids)} images "
+        f"-> {out_path}  ({time.time()-t0:.1f}s)",
+        flush=True,
+    )
+    return out_path
