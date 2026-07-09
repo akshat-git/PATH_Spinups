@@ -2,8 +2,9 @@
 #SBATCH --job-name=tcga_final
 #SBATCH --partition=gpu
 #SBATCH -G 4
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=32   # 8 dataloader workers/GPU (auto = cpus/GPUs = 32/4); most
+                             # gpu nodes are 32-core/4-GPU. Drop to 24 if the queue is long.
+#SBATCH --mem=64G            # headroom for 4 models x 8 workers of prefetch buffers
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -165,19 +166,63 @@ echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built
 # ── STEP 4: stage the persisted tiles scratch -> node-local SSD, feed the GPU ─
 echo; echo "### STEP 4/5  stage tiles to node-local SSD ($STAGE) for the GPU"
 PATCHES_SCRATCH="$TCGA/patches"   # persistent: tiled once by tile_slides, reused every run
+INPUT_MODE=""                     # set below: "patches" (intended) or a THUMBNAIL fallback
 # NB: count without `head` -- under `set -o pipefail`, `find | head` makes find die
 # with SIGPIPE and the whole test evaluates false even when patches exist.
 npatch=$(find "$PATCHES_SCRATCH" -mindepth 2 -name '*.jpg' 2>/dev/null | wc -l)
+
+# Loud, unmissable notice -- printed to BOTH the .out and the .err log -- whenever the
+# run degrades to any fallback path (thumbnails instead of tiles, or Lustre reads
+# instead of the node-local SSD). The user explicitly wants to be told about EVERY
+# fallback: a silent one wastes an expensive GPU job.
+fallback_banner() {                        # $1 headline, $2 detail, $3 impact
+  echo
+  echo "!!! ===================================================================== !!!"
+  echo "!!! FALLBACK: $1"
+  echo "!!! $2"
+  echo "!!! Impact: $3"
+  echo "!!! ===================================================================== !!!"
+  echo
+  echo "FALLBACK: $1 -- $2" >&2            # also surface in the .err log
+}
+
+# The staging technique only helps if there IS a node-local SSD to stage onto. In a GPU
+# job $L_SCRATCH is the fast local NVMe; on a login node there is none and $STAGE falls
+# back to Lustre (staging is then a no-op copy -- flag it).
+SSD_OK=0
+if [ -n "${L_SCRATCH:-}" ] && [ -d "${L_SCRATCH:-}" ]; then SSD_OK=1; fi
+[ "$SSD_OK" -eq 1 ] || echo "  NOTE: no node-local SSD (\$L_SCRATCH) here; staging target $STAGE is on Lustre."
+
 if [ "${npatch:-0}" -ge 1 ]; then
-  # Stage tiles onto the node-local SSD once, then the GPU reads them locally. With 9
-  # models each reading every patch, one Lustre->SSD copy beats 9 Lustre read passes.
+  # Stage ALL tiles onto the node-local SSD once, then the GPU reads them from fast local
+  # NVMe. With N models each sweeping every patch, one scratch->SSD copy beats N Lustre
+  # read passes -- this is what keeps extraction COMPUTE-bound (GPU), not I/O-bound.
   PATCHES_LOCAL="$STAGE/tcga_patches"
   mkdir -p "$PATCHES_LOCAL"
-  echo "  staging $npatch tiles: $PATCHES_SCRATCH -> $PATCHES_LOCAL (node-local SSD)"
+  echo "  staging $npatch tiles: $PATCHES_SCRATCH (Lustre) -> $PATCHES_LOCAL (node-local SSD)"
   ( cd "$PATCHES_SCRATCH" && tar -cf - . ) 2>/dev/null | ( cd "$PATCHES_LOCAL" && tar -xf - ) 2>/dev/null || true
-  export PFM_PATCH_DIR="$PATCHES_LOCAL"
+  # Require a COMPLETE stage: if fewer tiles land than exist (usually the SSD filled up),
+  # reading from the SSD would silently DROP the missing patches. Fall back to the
+  # complete set on scratch -- correct, but I/O may then bottleneck the GPU.
+  nstaged=$(find "$PATCHES_LOCAL" -mindepth 2 -name '*.jpg' 2>/dev/null | wc -l)
+  if [ "$SSD_OK" -eq 1 ] && [ "${nstaged:-0}" -ge "$npatch" ]; then
+    export PFM_PATCH_DIR="$PATCHES_LOCAL"
+    INPUT_MODE="patches ($nstaged tiles, node-local SSD)"
+    echo "  OK: all $nstaged tiles on SSD; GPU reads node-local -> compute-bound: $PFM_PATCH_DIR"
+  else
+    export PFM_PATCH_DIR="$PATCHES_SCRATCH"
+    INPUT_MODE="patches ($npatch tiles, SCRATCH/Lustre -- SSD staging $nstaged/$npatch) -- SLOW FALLBACK"
+    if [ "$SSD_OK" -ne 1 ]; then
+      fallback_banner "reading patch tiles from Lustre scratch, not a node-local SSD" \
+        "No \$L_SCRATCH on this node, so tiles were not staged locally." \
+        "extraction is I/O-bound on Lustre, NOT compute-bound (GPU may starve)."
+    else
+      fallback_banner "reading patch tiles from Lustre scratch, not the node-local SSD" \
+        "Only $nstaged/$npatch tiles reached the SSD ($STAGE) -- likely full." \
+        "reading the complete set from Lustre; extraction may be I/O-bound, not compute-bound."
+    fi
+  fi
   # compute knobs (batch/workers/amp/prefetch) come from the config spec -> STEP 5.
-  echo "  GPU reads node-local: $PFM_PATCH_DIR"
 else
   THUMBS_LOCAL="$STAGE/thumbnails"
   mkdir -p "$THUMBS_LOCAL"
@@ -186,11 +231,15 @@ else
   n_local=$(find "$THUMBS_LOCAL" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)
   if [ "$n_local" -ge 1 ]; then
     export PFM_PATCH_DIR="$THUMBS_LOCAL"
-    echo "  staged $n_local thumbnails -> $THUMBS_LOCAL (PFM_PATCH_DIR points here)"
+    INPUT_MODE="THUMBNAILS ($n_local staged, node-local) -- FALLBACK"
   else
-    echo "  WARN: no thumbnails staged; extraction will fall back to $TCGA/thumbnails"
+    INPUT_MODE="THUMBNAILS (loader reads $TCGA/thumbnails) -- FALLBACK"
   fi
+  fallback_banner "using THUMBNAILS, not persisted patch tiles" \
+    "No patch tiles found in $PATCHES_SCRATCH (tile_slides didn't finish, FINAL_CONFIG isn't the tiled config, or patches/ was purged -- see STEP 2)." \
+    "the COARSE 1-image-per-slide path, NOT the GPU-bound tiled run the tiled config intends."
 fi
+echo "  input mode: $INPUT_MODE"
 
 # ── STEP 5: extract embeddings for every model, then benchmark (train) ───────
 # Spread models across the allocated GPUs (one model/GPU). GPU count is detected from
@@ -228,8 +277,20 @@ echo; echo "  --- benchmark: train a linear probe per (model x task) ---"
 echo; hr
 echo " FINAL SETUP COMPLETE"
 echo "   dataset:    $DATASET"
+echo "   input used: ${INPUT_MODE:-unknown}"
 echo "   SVS cache:  $TCGA/slides   ($(du -sh "$TCGA/slides" 2>/dev/null | cut -f1 || echo n/a))"
 echo "   embeddings: $EMB/<model>/patch_embeddings.pt"
 echo "   results:    $EMB/benchmark/results.csv"
 echo "   end:        $(date)"
+case "${INPUT_MODE:-}" in
+  *THUMBNAILS*)
+    echo "   ⚠  RAN ON THUMBNAILS (fallback) -- NOT the tiled patch-level result."
+    echo "      Re-run once tile_slides has persisted patches to $PATCHES_SCRATCH."
+    echo "      ran on thumbnails, not patch tiles" >&2 ;;
+  *"SLOW FALLBACK"*)
+    echo "   ⚠  Ran on patch tiles but read from Lustre scratch, not the node-local SSD"
+    echo "      -- extraction was likely I/O-bound, not compute-bound. Check SSD capacity"
+    echo "      (\$L_SCRATCH) so the full patch set can stage locally next run."
+    echo "      ran I/O-bound off Lustre, not compute-bound off SSD" >&2 ;;
+esac
 hr
