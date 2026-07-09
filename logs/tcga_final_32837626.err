@@ -1,65 +1,0 @@
-[1;33m[pfm:warn][0m [conch] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [conch] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-/scratch/users/akshatg/stanf_pfm/runtime/venvs/conch/lib/python3.11/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
-  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
-/scratch/users/akshatg/stanf_pfm/runtime/venvs/conch/lib/python3.11/site-packages/conch/open_clip_custom/factory.py:18: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
-  checkpoint = torch.load(checkpoint_path, map_location=map_location)
-[1;33m[pfm:warn][0m [uni2] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [uni2] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [virchow] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [virchow] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [virchow2] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [virchow2] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [titan] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [titan] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-Loading weights:   0%|          | 0/246 [00:00<?, ?it/s]Loading weights:  15%|█▌        | 37/246 [00:00<00:00, 362.35it/s]Loading weights: 100%|██████████| 246/246 [00:00<00:00, 1458.96it/s]
-Traceback (most recent call last):
-  File "/scratch/users/akshatg/stanf_pfm/models/titan/titan_spin.py", line 53, in <module>
-    main()
-  File "/scratch/users/akshatg/stanf_pfm/models/titan/titan_spin.py", line 22, in main
-    titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/scratch/users/akshatg/stanf_pfm/runtime/venvs/titan/lib/python3.11/site-packages/transformers/models/auto/auto_factory.py", line 391, in from_pretrained
-    return model_class.from_pretrained(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/scratch/users/akshatg/stanf_pfm/runtime/venvs/titan/lib/python3.11/site-packages/transformers/modeling_utils.py", line 4328, in from_pretrained
-    loading_info = cls._finalize_model_loading(model, load_config, loading_info)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/scratch/users/akshatg/stanf_pfm/runtime/venvs/titan/lib/python3.11/site-packages/transformers/modeling_utils.py", line 4484, in _finalize_model_loading
-    model._move_missing_keys_from_meta_to_device(
-  File "/scratch/users/akshatg/stanf_pfm/runtime/venvs/titan/lib/python3.11/site-packages/transformers/modeling_utils.py", line 4774, in _move_missing_keys_from_meta_to_device
-    for key in missing_keys - self.all_tied_weights_keys.keys():
-                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/conda/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1729, in __getattr__
-    raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-AttributeError: 'Titan' object has no attribute 'all_tied_weights_keys'. Did you mean: '_tied_weights_keys'?
-[1;33m[pfm:warn][0m [titan] exited with code 1 (likely the missing-data step -- see log above).
-[1;33m[pfm:warn][0m [gigapath] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [gigapath] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [mSTAR] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [mSTAR] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [exaone-path] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [exaone-path] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-Fetching 41 files:   0%|          | 0/41 [00:00<?, ?it/s]Fetching 41 files: 100%|██████████| 41/41 [00:00<00:00, 2565.48it/s]
-Loading weights:   0%|          | 0/150 [00:00<?, ?it/s]Loading weights: 100%|██████████| 150/150 [00:00<00:00, 2211.94it/s]
-[1;33m[pfm:warn][0m [phikon] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [phikon] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-Loading weights:   0%|          | 0/439 [00:00<?, ?it/s]Loading weights:   4%|▍         | 17/439 [00:00<00:05, 79.75it/s]Loading weights:   6%|▌         | 25/439 [00:00<00:07, 51.87it/s]Loading weights:  13%|█▎        | 58/439 [00:00<00:03, 126.65it/s]Loading weights:  20%|██        | 88/439 [00:00<00:02, 174.55it/s]Loading weights:  29%|██▊       | 126/439 [00:00<00:01, 230.08it/s]Loading weights:  36%|███▌      | 156/439 [00:00<00:01, 238.68it/s]Loading weights:  42%|████▏     | 183/439 [00:01<00:01, 220.78it/s]Loading weights: 100%|██████████| 439/439 [00:01<00:00, 424.93it/s]
-[1;33m[pfm:warn][0m [h-optimus] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [h-optimus] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-[1;33m[pfm:warn][0m [h-optimus] exited with code 75 (likely the missing-data step -- see log above).
-[1;33m[pfm:warn][0m [hipt] note: reads real TCGA images from the configured paths (PFM_PATCH_DIR ->
-[1;33m[pfm:warn][0m [hipt] thumbnails). If none are staged yet, the run stops cleanly at that step.
-Note: Environment variable`HF_TOKEN` is set and is the current active token independently from the token you've just configured.
-/scratch/users/akshatg/stanf_pfm/runtime/repos/HIPT/HIPT_4K/hipt_model_utils.py:61: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
-  state_dict = torch.load(pretrained_weights, map_location="cpu")

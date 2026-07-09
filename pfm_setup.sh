@@ -134,12 +134,15 @@ fi
 PFM_BASE_IMAGE="${PFM_BASE_IMAGE:-docker://pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime}"
 SIF="$CONTAINER_DIR/pfm_base.sif"
 
-# HuggingFace token: prefer $HF_TOKEN from the env; otherwise read the gitignored
-# $PFM_ROOT/.hf_token file (same as the job scripts). NEVER hard-code a token here --
-# this file is tracked in git, so a literal would leak the secret on commit/share.
-HF_TOKEN="${HF_TOKEN: hf_***}"
-if [ -z "$HF_TOKEN" ] && [ -f "$PFM_ROOT/.hf_token" ]; then
+# HuggingFace token: the gitignored $PFM_ROOT/.hf_token file is the SINGLE source of
+# truth. NEVER hard-code a token in this script -- it is tracked in git, so a literal
+# would leak the secret on commit/share. The file wins; a pre-set $HF_TOKEN env var is
+# used only as a fallback when the file is absent. If neither exists, gated models are
+# simply skipped.
+if [ -f "$PFM_ROOT/.hf_token" ]; then
   HF_TOKEN="$(tr -d '[:space:]' < "$PFM_ROOT/.hf_token")"
+else
+  HF_TOKEN="${HF_TOKEN:-}"
 fi
 
 # Redirect every cache / temp dir off of $HOME and onto $SCRATCH.
@@ -357,6 +360,15 @@ setup_one() {
   venv="$(venv_path "$m")"
   vpy="$(venv_python "$m")"
   vpip="$(venv_pip "$m")"
+
+  # 0) idempotent skip: a venv whose pyvenv.cfg exists is treated as already set up --
+  # just move on (this is what lets `final_setup.sh` re-run cheaply). The venv python is
+  # a container-only symlink, so pyvenv.cfg -- not `-x python` -- is the host-visible
+  # marker. Delete the venv dir (or run `pfm_setup.sh clean`) to force a fresh reinstall.
+  if [[ -f "$venv/pyvenv.cfg" ]]; then
+    log "[$m] venv already present -> $venv (skipping setup)"
+    return 0
+  fi
 
   # 1) create an isolated venv (reuses the container's torch via system packages)
   if [[ ! -x "$vpy" ]]; then

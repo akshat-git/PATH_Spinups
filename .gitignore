@@ -1,0 +1,45 @@
+# =============================================================================
+#  .gitignore — git tracks ONLY the code needed to set everything up.
+#  A fresh clone reproduces the whole pipeline in two steps:
+#    1. create runtime/.hf_token with your HuggingFace token
+#    2. mkdir -p logs && sbatch jobs/final_setup.sh
+#  Everything below is generated, downloaded, large, or secret — never committed.
+# =============================================================================
+
+# ── All runtime artifacts: containers (.sif), per-model venvs, HF/pip/torch
+#    caches, cloned model repos, extracted embeddings, the TCGA data cache
+#    (slides, thumbnails, tables) AND the persisted patch tiles. All on $SCRATCH.
+runtime/
+
+# ── Secrets: HuggingFace tokens (belt-and-suspenders; runtime/ already covers
+#    runtime/.hf_token). Never commit a token.
+**/.hf_token
+
+# ── Slurm job output (logs, not code). Keep the logs/ dir itself (see .gitkeep).
+logs/*.out
+logs/*.err
+
+# ── Any stray data / model artifacts that might land outside runtime/
+*.svs
+*.sif
+patches/
+thumbnails/
+embeddings/
+*.pt
+*.h5
+
+# ── Python bytecode / build caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# ── Editor / OS cruft
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/

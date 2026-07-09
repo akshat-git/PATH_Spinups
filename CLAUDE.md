@@ -72,7 +72,7 @@ jobs/
   build_tcga_dataset.sh   #   sbatch: run the ETL pipeline (CPU/normal)
   smoke_build_tcga.sh     #   smoke test: real 5-slide -> phikon -> probe (CPU/normal)
   proof_all_models.sh     #   proof: real 60-slide -> all 11 models -> probes (GPU, non-fatal/model)
-  final_setup.sh          #   ★ FINAL run: staged ~50 GB full-SVS -> all models -> train (GPU)
+  final_setup.sh          #   ★ FINAL run: tile SVS (persist patches) -> setup venvs -> all models -> train (GPU)
   verify_conch_hipt.sh    #   fast CPU setup+load-only check for conch/hipt
   verify_tcga_env.py      #   sanity-checks the data-build venv imports
 runtime/                  # ALL artifacts on $SCRATCH (mode 700). Git-ignored.
@@ -197,10 +197,12 @@ Job knobs: `SMOKE_MAX_FILES`/`SMOKE_MODEL`/`SMOKE_MIN_SAMPLES`; `PROOF_MAX_FILES
   `runtime/proof/`. **Non-fatal per model**: a failing model never aborts the others;
   each outcome + log captured in `proof.md`/`proof.csv` + `logs/<model>.log`. Classifies
   rc 75 → `NO-ACCESS` (disregarded), rc 137/139 → `OOM`. titan = load-only.
-- **Final — `jobs/final_setup.sh` (GPU).** Ensure containers → build the staged
-  ~50 GB dataset **only if absent** (else reuse the cache) → stage thumbnails
-  node-local → `pfm_setup.sh run` (all models) → `benchmark`. Submit:
-  `mkdir -p logs && sbatch jobs/final_setup.sh`.
+- **Final — `jobs/final_setup.sh` (GPU).** Ensure data container/venv → build the
+  dataset (default `tcga_tiled.yaml`: tile each SVS into patches **persisted** to
+  `$PFM_TCGA_ROOT/patches`, tiled once + reused) → ensure model container **AND**
+  per-model venvs (`pfm_setup.sh setup`, idempotent — skips venvs already built) →
+  stage the persisted patches node-local → `pfm_setup.sh run` (all models) →
+  `benchmark`. Submit: `mkdir -p logs && sbatch jobs/final_setup.sh`.
 
 Repo-dir resolution in the job scripts picks the first candidate that actually
 contains the pipeline files (`build_tcga_dataset.py` + `jobs/verify_tcga_env.py`):
@@ -226,8 +228,10 @@ work whether submitted from the repo root or `jobs/`.
   in 192 s (vs 2.4 s for 142 thumbnails); after the 2→8 dataloader-worker fix, ~0.0073 s/patch
   (~15× faster — the GPU was starved, not compute-bound). titan load-only; h-optimus NO-ACCESS.
 - `final_setup.sh` is the real-run entry point. STEP 2 always runs the resumable build (no
-  silent-reuse short-circuit); STEP 4 auto-detects the persisted `patches/` furnace and sets
-  batch=64/workers=8. `FINAL_CONFIG=tcga_tiled.yaml` selects patch tiling; bare = thumbnails.
+  silent-reuse short-circuit); STEP 3 ensures the model container AND per-model venvs
+  (`pfm_setup.sh setup`, idempotent); STEP 4 auto-detects the persisted `patches/` furnace and
+  sets batch/workers from the config's `compute:` block. Default `FINAL_CONFIG=tcga_tiled.yaml`
+  (patch tiling, patches persisted+reused); set `FINAL_CONFIG=tcga_staged.yaml` for thumbnails.
 - **Patches persist** to `PFM_TCGA_ROOT/patches/` — tiled once, reused (no re-tile/re-download).
   `jobs/download_tcga.sh` optionally pre-fills the SVS cache. All Python compiles; jobs `bash -n` clean.
 - No `$HOME`/group-storage dependencies at runtime; everything under `runtime/`.

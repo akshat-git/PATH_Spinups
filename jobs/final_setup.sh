@@ -22,12 +22,16 @@
 #      skipped. So this DOWNLOADS THE SUBSET ONLY IF NEEDED -- otherwise it just
 #      accesses the cache and runs training.
 #
-#  Flow:  ensure data container/venv -> (build 50 GB staged dataset IF absent)
-#         -> ensure model container -> stage thumbnails to node-local
-#         -> extract embeddings for every model (GPU) -> benchmark (train probes).
+#  Flow:  ensure data container/venv -> build the dataset, tiling each SVS into
+#         tissue PATCHES that PERSIST under $PFM_TCGA_ROOT/patches (tiled once,
+#         reused every run) -> ensure model container + per-model venvs
+#         -> stage the persisted patches to node-local -> extract embeddings for
+#         every model (GPU) -> benchmark (train probes).
 #
 #  Submit:  mkdir -p logs && sbatch jobs/final_setup.sh
-#  Knobs:   FINAL_TARGET_GB (default from config: 50)   PFM_TCGA_ROOT (cache loc)
+#  Knobs:   FINAL_CONFIG (default configs/tcga_tiled.yaml; set tcga_staged.yaml for
+#           the coarse 1-thumbnail/slide path)   FINAL_TARGET_GB (config default: 50)
+#           PFM_TCGA_ROOT (cache + persisted patches location)
 # =============================================================================
 set -uo pipefail
 
@@ -80,13 +84,17 @@ TCGA_SIF="$RUNTIME/containers/tcga_build.sif"
 TCGA_VENV="$RUNTIME/venvs/tcga_build"
 PFM_SIF="$RUNTIME/containers/pfm_base.sif"
 DATASET="$TCGA/tables/dataset.csv"
-CONFIG="${FINAL_CONFIG:-configs/tcga_staged.yaml}"
+# Default to the patch-TILED config: it cuts each SVS into tissue patches and PERSISTS
+# them to $PFM_TCGA_ROOT/patches (tiled once, reused every run) so we never re-tile or
+# fall back to the on-the-fly loader. Override with FINAL_CONFIG=configs/tcga_staged.yaml
+# for the coarse 1-thumbnail/slide path instead.
+CONFIG="${FINAL_CONFIG:-configs/tcga_tiled.yaml}"
 
 hr(){ echo "============================================================"; }
 fail(){ echo; echo "FINAL SETUP ABORTED at: $*"; echo "=== end: $(date) ==="; exit 1; }
 
 hr
-echo " FINAL SETUP — staged full-SVS (~50 GB) -> all models -> train"
+echo " FINAL SETUP — tile SVS -> persist patches -> all models -> train  ($CONFIG)"
 echo "   node:        $(hostname)"
 echo "   job:         ${SLURM_JOB_ID:-interactive}"
 echo "   repo:        $REPO"
@@ -137,14 +145,22 @@ fi
 [ -f "$DATASET" ] || fail "no dataset.csv produced at $DATASET"
 echo "  dataset ready: $DATASET  ($(($(wc -l < "$DATASET") - 1)) rows)"
 
-# ── STEP 3: ensure GPU/torch model container ─────────────────────────────────
-echo; echo "### STEP 3/5  ensure model container (pfm_base.sif)"
+# ── STEP 3: ensure GPU/torch model container + per-model venvs ───────────────
+echo; echo "### STEP 3/5  ensure model container (pfm_base.sif) + per-model venvs"
 if [ -f "$PFM_SIF" ]; then
-  echo "  present: $PFM_SIF"
+  echo "  container present: $PFM_SIF"
 else
-  echo "  missing -> pfm_setup.sh build"
+  echo "  container missing -> pfm_setup.sh build"
   ( cd "$REPO" && bash pfm_setup.sh build ) || fail "model container build"
 fi
+# Create any model venvs that don't exist yet. pfm_setup's `setup` is idempotent: a
+# model whose venv (pyvenv.cfg) already exists is skipped, so this is a fast no-op when
+# the venvs are already built, and a full per-model install on a fresh runtime. Failures
+# are non-fatal here -- the run step (STEP 5) is per-model, so a bad venv only drops that
+# one model rather than aborting the whole job.
+echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built)"
+( cd "$REPO" && bash pfm_setup.sh setup ) \
+  || echo "  WARN: one or more model venvs failed to set up (see log above); continuing."
 
 # ── STEP 4: stage the persisted tiles scratch -> node-local SSD, feed the GPU ─
 echo; echo "### STEP 4/5  stage tiles to node-local SSD ($STAGE) for the GPU"
