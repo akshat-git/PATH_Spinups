@@ -7,8 +7,9 @@
                              # single-node script only used the head node's 2 GPUs.
 #SBATCH --cpus-per-task=20   # 5 dataloader workers/GPU (auto = cpus/GPUs = 20/4); fits the
                              # 20-core gpu nodes too, so it schedules on more of the pool.
-#SBATCH --mem=128G           # 4 model procs now share ONE node (--nodes=1); prior 2-proc run
-                             # OOM'd at 32G. 128G fits every gpu node (>=191G) with headroom.
+#SBATCH --mem=48G            # RAM = bounded DataLoader prefetch window (workers x prefetch x
+                             # batch), INDEPENDENT of dataset size -- identical for mini & full.
+                             # Covers all 4 model procs' windows on this node (streaming, no preload).
 #SBATCH --time=03:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
