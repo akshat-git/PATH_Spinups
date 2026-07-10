@@ -111,8 +111,8 @@ Every strategy shares one **acquisition fallback chain** (per slide, resumable):
 **preprocessed artifact already on `$SCRATCH` → skip** · else **full SVS pre-downloaded
 to the cache → use it (no download)** · else **stream the SVS into node-local `$TMPDIR`,
 use it, evict** (nothing large persists). Only the small artifact (thumbnail or patches)
-is kept. `jobs/download_tcga.sh` optionally pre-fills the SVS cache so a later run hits
-the middle branch instead of streaming.
+is kept. (The middle branch is used only if an SVS cache was pre-filled via the
+`download_svs_cache` pipeline step; otherwise every slide streams on demand.)
 
 **(C) FINAL run — patch tiling → GPU-bound** (`slide_tiler.py`, step `tile_slides`,
 `configs/tcga_tiled.yaml`). Each slide is cut into **many tissue patches** (real WSI
@@ -121,7 +121,7 @@ workflow) instead of one thumbnail, so extraction is GPU-bound, not I/O-bound:
 ```
    acquire the SVS (fallback chain above) → node-local $TMPDIR/<name>.svs
         │  Otsu tissue mask on a downsampled thumbnail (adaptive per slide) →
-        │  keep grid cells with ≥ tissue_thresh tissue, up to max_patches (~1000/slide)
+        │  keep EVERY grid cell with ≥ tissue_thresh tissue (uncapped: ~16k/slide, ~2.26M total)
         ▼
    PERSISTENT  runtime/<root>/patches/<slide_id>/<slide_id>__x<X>_y<Y>.jpg   ← tiled ONCE
         │        (reused every run; tiling is a one-time cost — this IS the fallback top branch)
@@ -129,19 +129,9 @@ workflow) instead of one thumbnail, so extraction is GPU-bound, not I/O-bound:
 ```
 
 **(A) staged full-SVS → 1 thumbnail/slide** (`slide_stager.py`, step `stage_process`,
-`configs/tcga_staged.yaml`). Same acquisition, but produces one 512×512 thumbnail per
-slide instead of patches (fast, I/O-bound, coarse — a slide overview, not tissue detail).
-
-**(B) thumbnail range-streaming** (`slide_streamer.py`, step `stream_thumbnails`,
-`configs/tcga_streaming.yaml`). No full slide hits disk — GDC supports HTTP Range, so
-tifffile reads only the embedded thumbnail bytes (~100× less transferred):
-
-```
-   HTTPRangeFile(GDC /data/<file_id>) → tifffile grabs the embedded "Thumbnail" (~few MB)
-        │  (fallback: if not range-readable, one bounded full download → delete)
-        ▼
-   runtime/<root>/thumbnails/<slide_id>.jpg
-```
+`configs/tcga_staged.yaml`, selected via `FINAL_CONFIG`). Same acquisition, but produces
+one 512×512 thumbnail per slide instead of patches (fast, I/O-bound, coarse — a slide
+overview, not tissue detail).
 
 ### Stage 4 — Assemble the label table   ·   `gene_matrix.py` + `pipeline.py`
 
@@ -337,18 +327,13 @@ stanf_pfm/
 │   ├── pipeline.py         # TCGADatasetBuilder: chains the steps
 │   └── README.md           # ETL reference (diagrams, steps, config)
 ├── configs/
-│   ├── tcga_tiled.yaml     # ★ FINAL: patch tiling → GPU-bound (tile_slides, ~1000 patches/slide)
-│   ├── tcga_staged.yaml    # staged full-SVS → 1 thumbnail/slide (stage_process)
-│   └── tcga_streaming.yaml # thumbnail range-streaming (stream_thumbnails)
+│   ├── tcga_tiled.yaml     # ★ DEFAULT: patch tiling → GPU-bound (tile_slides, uncapped)
+│   └── tcga_staged.yaml    # staged full-SVS → 1 thumbnail/slide (FINAL_CONFIG override)
 ├── jobs/
 │   ├── setup_tcga.sh          # one-time: build tcga_build.sif + venv (CPU/normal)
-│   ├── download_tcga.sh       # ★ optional: pre-download SVS cache (download_svs_cache, CPU/normal)
-│   ├── build_tcga_dataset.sh  # run the ETL pipeline (CPU/normal)
-│   ├── smoke_build_tcga.sh    # smoke: 5-slide → phikon → probe (CPU/normal)
-│   ├── proof_all_models.sh    # proof: 60-slide → all 11 models → probes (GPU, non-fatal)
-│   ├── final_setup.sh         # ★ FINAL run (GPU): acquire → tile/thumbnail → all models → train
-│   ├── verify_conch_hipt.sh   # fast CPU load-only check for conch/hipt
-│   └── verify_tcga_env.py     # sanity-check the data-build venv imports
+│   ├── final_setup.sh         # ★ FINAL run (GPU): self-bootstraps → tile/persist ALL patches → all models → train
+│   ├── final_setup_mini.sh    # ★ same, but extract on a 1/MINI_FRACTION (default 10%) sample → short walltime
+│   └── verify_tcga_env.py     # sanity-check the data-build venv imports (used by setup_tcga.sh)
 │
 └── runtime/            # ALL generated artifacts (on $SCRATCH, never $HOME/group). Git-ignored.
     ├── containers/     #   pfm_base.sif (torch) + tcga_build.sif (data)
@@ -362,36 +347,34 @@ stanf_pfm/
 
 > **Patches persist.** With tiling, `PFM_TCGA_ROOT/patches/` is written **once** and reused
 > every run (the top of the acquisition fallback chain) — no re-tiling, no re-download.
-> Full SVS never persist unless you run `jobs/download_tcga.sh` to pre-fill the cache.
+> Full SVS never persist (each is streamed into node-local temp, tiled, and evicted).
 
 ---
 
 ## 7 · Run it
 
-All heavy work goes through Slurm (never the login node). Each script
-**self-bootstraps** — it builds any missing container/venv first.
+All heavy work goes through Slurm (never the login node). Both entrypoints are
+**fully self-bootstrapping** — on a fresh checkout (after you add `runtime/.hf_token`)
+they build every missing piece (data container/venv, dataset+patches, model container +
+per-model venvs) before extracting. Nothing is assumed to pre-exist.
 
 ```bash
-# ── FINAL run (GPU): acquire → preprocess → all models → train ───────────────
 mkdir -p logs
 
-# patch tiling (GPU-bound, real WSI workflow) — tiles once, persists, reuses:
-FINAL_CONFIG=configs/tcga_tiled.yaml FINAL_TARGET_GB=50 sbatch jobs/final_setup.sh
-
-# or 1-thumbnail-per-slide (fast, I/O-bound, coarse):
+# ── FULL run (GPU): tile+persist ALL patches → all models → train ────────────
+# Extraction runs on the full ~2.26M patches, so use the 2-day gpu walltime.
 sbatch jobs/final_setup.sh
-#   knobs: FINAL_TARGET_GB (subset size), PFM_TCGA_ROOT (data root), PFM_OUTPUT_DIR
+#   knobs: FINAL_CONFIG (default configs/tcga_tiled.yaml; tcga_staged.yaml = thumbnails),
+#          FINAL_TARGET_GB (subset size), PFM_TCGA_ROOT (data root), PFM_OUTPUT_DIR
 
-# optional: pre-download the SVS cache once so runs never stream (CPU/normal):
-DOWNLOAD_TARGET_GB=50 sbatch jobs/download_tcga.sh
-
-# ── quick checks ─────────────────────────────────────────────────────────────
-sbatch jobs/smoke_build_tcga.sh       # 5 slides, phikon only, CPU — minutes
-sbatch jobs/proof_all_models.sh       # 60 slides, all 11 models, GPU — proof table per model
+# ── MINI run (GPU): same setup, extract on a 1/10 SAMPLE → fits a short walltime
+sbatch jobs/final_setup_mini.sh
+#   knob: MINI_FRACTION (default 10 → use 1/10 of the persisted patches)
 
 # ── watch ────────────────────────────────────────────────────────────────────
 squeue --me
-tail -f logs/tcga_final_<jobid>.out   # STEP 1→5; STEP 2 logs "N downloaded, M reused"
+tail -f logs/tcga_final_<jobid>.out        # STEP 1→5
+tail -f logs/tcga_final_mini_<jobid>.out   # mini
 ```
 
 Piece by piece (from an interactive GPU alloc, `salloc -p gpu -G 1`):

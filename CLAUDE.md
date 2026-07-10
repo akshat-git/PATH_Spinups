@@ -64,27 +64,30 @@ tcga/                     # the TCGA/GDC ETL package (flattened to repo root)
                           #     stream_thumbnails/stage_process/tile_slides/gene_matrix/assemble)
   README.md               #   ETL reference (diagrams, steps, config)
 configs/
-  tcga_tiled.yaml         #   FINAL (GPU-bound): patch tiling, ~1000 patches/slide, persisted (tile_slides)
-  tcga_staged.yaml        #   staged full-SVS -> 1 thumbnail/slide (stage_process); stream_to_local default
-  tcga_streaming.yaml     #   thumbnail range-STREAMING path (stream_thumbnails); no full SVS on disk
+  tcga_tiled.yaml         #   DEFAULT (GPU-bound): patch tiling, persisted (tile_slides)
+  tcga_staged.yaml        #   staged full-SVS -> 1 thumbnail/slide (stage_process); FINAL_CONFIG override
 jobs/
   setup_tcga.sh           #   one-time: build tcga_build.sif + tcga_build venv (CPU/normal)
-  build_tcga_dataset.sh   #   sbatch: run the ETL pipeline (CPU/normal)
-  smoke_build_tcga.sh     #   smoke test: real 5-slide -> phikon -> probe (CPU/normal)
-  proof_all_models.sh     #   proof: real 60-slide -> all 11 models -> probes (GPU, non-fatal/model)
-  final_setup.sh          #   ★ FINAL run: tile SVS (persist patches) -> setup venvs -> all models -> train (GPU)
-  verify_conch_hipt.sh    #   fast CPU setup+load-only check for conch/hipt
-  verify_tcga_env.py      #   sanity-checks the data-build venv imports
+  final_setup.sh          #   ★ FINAL run: self-bootstraps everything -> tile+persist ALL patches ->
+                          #     all models -> train (GPU). Failsafe: builds any missing container/venv/data.
+  final_setup_mini.sh     #   ★ same as final_setup.sh but extraction uses a 1/MINI_FRACTION (default 10%)
+                          #     SAMPLE of the persisted patches -> ~10x less GPU work, fits a short walltime.
+  verify_tcga_env.py      #   sanity-checks the data-build venv imports (used by setup_tcga.sh)
 runtime/                  # ALL artifacts on $SCRATCH (mode 700). Git-ignored.
   containers/             #   pfm_base.sif + tcga_build.sif (both built)
   venvs/<model>/          #   one venv per model + tcga_build (all present)
   repos/HIPT/             #   cloned HIPT (HIPT_4K code + ViT-256 ckpt) for hipt
   cache/huggingface/      #   HF_HOME (model weights cached here)
   embeddings/             #   default PFM_OUTPUT_DIR; <model>/patch_embeddings.pt + benchmark/
-  tcga/                   #   default PFM_TCGA_ROOT (tables/, thumbnails/, slides/ = the ~50 GB cache)
-  proof/  smoke/          #   isolated trees for proof_all_models.sh / smoke_build_tcga.sh
-  .hf_token               #   HF token file (read by proof/final for gated models)
+  tcga/                   #   default PFM_TCGA_ROOT (tables/, patches/, slides/ = the data cache)
+  .hf_token               #   HF token file (the ONLY token source; read by final/mini for gated models)
 ```
+
+Only two entrypoints remain (`final_setup.sh`, `final_setup_mini.sh`); the old smoke/
+proof/verify job scripts and the streaming config were removed. Both entrypoints are
+**fully self-bootstrapping** — on a fresh checkout an external party runs one of them and
+it builds every missing piece (data container/venv, dataset+patches, model container +
+per-model venvs) before extracting.
 
 ## The 11 models
 
@@ -99,7 +102,7 @@ Per-model install/adapter facts worth knowing:
 - **mSTAR** — also installed from a GitHub HTTPS zip archive.
 - **hipt** — no HF weights: the ViT-256 code lives in the cloned `runtime/repos/HIPT`
   (`hipt_spin.py` puts the repo root AND `HIPT_4K/` on `sys.path`); its checkpoint is
-  a git-LFS pointer in the repo, so proof/final download the real ~700 MB file from
+  a git-LFS pointer in the repo, so the run downloads the real ~700 MB file from
   the LFS media URL (branch `master`) to `PFM_HIPT_CKPT`. hipt deps
   (cv2/h5py/scipy/skimage/webdataset/einops/tqdm) are in `model_pip_pkgs`. Its
   transform resizes to 256×256 (ViT-256 input; HIPT's own `eval_transforms()` has no
@@ -154,24 +157,22 @@ gene labels align (`_resolve_manifest` prefers a subset manifest when present).
 
 **Acquisition fallback chain** (per slide, in `acquire_stage_process`/`acquire_tile_process`,
 resumable): preprocessed artifact (patches/thumbnail) already present -> **skip**; else full
-SVS in the `$SCRATCH` cache (`PFM_TCGA_ROOT/slides`, pre-filled by `jobs/download_tcga.sh` /
-step `download_svs_cache`) -> use it; else (`download.stream_to_local: true`, the default)
+SVS in the `$SCRATCH` cache (`PFM_TCGA_ROOT/slides`, if pre-filled by the `download_svs_cache`
+pipeline step) -> use it; else (`download.stream_to_local: true`, the default)
 **stream the SVS into node-local `$TMPDIR`, use it, evict** (nothing large persists). Only
 the small artifact is kept.
 
 - **Patch tiling (the real GPU-bound run — `final_setup.sh` + `FINAL_CONFIG=tcga_tiled.yaml`).**
   Step `tile_slides` (`slide_tiler.py`): acquire each SVS (chain above), Otsu tissue mask,
-  cut up to `patches.max_patches` (~1000) tissue patches of `patch_size` (256), **persist**
-  to `PFM_TCGA_ROOT/patches/<slide_id>/<sid>__x_y.jpg` (tiled ONCE, reused every run), evict
-  the SVS. ~100k+ patches -> extraction is GPU-bound. `final_setup` STEP 4 auto-detects the
-  patches dir and sets `PFM_BATCH_SIZE=64`, `PFM_NUM_WORKERS=8` (the 2->8 worker fix was ~15×:
-  the GPU was dataloader-starved, not compute-bound).
+  cut **every** tissue cell (`tcga_tiled.yaml` is UNCAPPED — no `max_patches`) of `patch_size`
+  (256), **persist** to `PFM_TCGA_ROOT/patches/<slide_id>/<sid>__x_y.jpg` (tiled ONCE, reused
+  every run), evict the SVS. In practice ~16k patches/slide → ~2.26M total across 142 slides,
+  so extraction is heavily GPU-bound (and `final_setup.sh` needs the 2-day walltime; use
+  `final_setup_mini.sh` to run on a 1/10 sample). `final_setup` STEP 4 stages the patches to the
+  node-local SSD and reads the `compute:` block for batch/workers (nothing hardcoded).
 - **Staged full-SVS -> 1 thumbnail/slide (`tcga_staged.yaml`, step `stage_process`).** Same
   acquisition; produces one 512×512 thumbnail per slide (fast, I/O-bound, coarse). N≈142, so
-  the GPU is idle — extraction was never the bottleneck (download was).
-- **Thumbnail range-streaming (`tcga_streaming.yaml`, step `stream_thumbnails`).** GDC `/data`
-  supports HTTP Range, so `HTTPRangeFile`+`tifffile` read ONLY each slide's embedded thumbnail
-  (~MBs, no full SVS on disk); per-slide fallback to a bounded full download.
+  the GPU is idle — extraction was never the bottleneck (download was). `FINAL_CONFIG` override.
 
 ## Config / env knobs
 
@@ -188,21 +189,22 @@ Job knobs: `SMOKE_MAX_FILES`/`SMOKE_MODEL`/`SMOKE_MIN_SAMPLES`; `PROOF_MAX_FILES
 `PROOF_MODELS`/`PROOF_MIN_SAMPLES`; `FINAL_TARGET_GB`; `MED_PROJECT_DIR`/`PFM_REPO`/
 `PFM_PROJECT_DIR` (dir overrides).
 
-## Functional tests / runs (self-bootstrapping; build any missing container/venv)
+## Entrypoints (both GPU, both fully self-bootstrapping / failsafe)
 
-- **Smoke — `jobs/smoke_build_tcga.sh` (1 model, 5 slides, CPU/`normal`).** Real GDC
-  build → phikon extract → probe, in `runtime/smoke/`. With 5 slides the probe is
-  often skipped (too few labelled) — still proves the path; raise `SMOKE_MAX_FILES`.
-- **Proof — `jobs/proof_all_models.sh` (all 11 models, 60 slides, GPU).** In
-  `runtime/proof/`. **Non-fatal per model**: a failing model never aborts the others;
-  each outcome + log captured in `proof.md`/`proof.csv` + `logs/<model>.log`. Classifies
-  rc 75 → `NO-ACCESS` (disregarded), rc 137/139 → `OOM`. titan = load-only.
-- **Final — `jobs/final_setup.sh` (GPU).** Ensure data container/venv → build the
-  dataset (default `tcga_tiled.yaml`: tile each SVS into patches **persisted** to
-  `$PFM_TCGA_ROOT/patches`, tiled once + reused) → ensure model container **AND**
-  per-model venvs (`pfm_setup.sh setup`, idempotent — skips venvs already built) →
-  stage the persisted patches node-local → `pfm_setup.sh run` (all models) →
-  `benchmark`. Submit: `mkdir -p logs && sbatch jobs/final_setup.sh`.
+Both build every missing piece themselves — data container/venv (STEP 1), the dataset
+with patches tiled+persisted to `$PFM_TCGA_ROOT/patches` (STEP 2), model container **AND**
+per-model venvs (STEP 3, `pfm_setup.sh setup`, idempotent — skips venvs already built) —
+then stage patches node-local (STEP 4) → `pfm_setup.sh run` (all models) → `benchmark`
+(STEP 5). An external party can run either on a fresh checkout (after adding
+`runtime/.hf_token`) and it works end-to-end.
+
+- **Final — `jobs/final_setup.sh` (GPU).** Extraction runs on **ALL** persisted patches
+  (default config `tcga_tiled.yaml`). Submit: `mkdir -p logs && sbatch jobs/final_setup.sh`.
+- **Mini — `jobs/final_setup_mini.sh` (GPU).** Identical, except STEP 4 stages only a
+  **1/`MINI_FRACTION`** (default 10%) sample of the tiles to the SSD → ~10× less GPU work,
+  fits a short walltime. STEP 2 still tiles+persists the FULL set, so `final_setup.sh` can
+  use all of them later — nothing is discarded. Submit:
+  `mkdir -p logs && sbatch jobs/final_setup_mini.sh`. Knob: `MINI_FRACTION`.
 
 Repo-dir resolution in the job scripts picks the first candidate that actually
 contains the pipeline files (`build_tcga_dataset.py` + `jobs/verify_tcga_env.py`):
@@ -219,7 +221,7 @@ work whether submitted from the repo root or `jobs/`.
   and `**/.hf_token`, so a commit captures only code.
 - Both containers + all 11 model venvs + `tcga_build` venv are **built**. HF token at
   `runtime/.hf_token`.
-- **conch and hipt** verified loading (CPU load-only). On the last GPU proof, 8 models
+- **conch and hipt** verified loading (CPU load-only). On the last GPU run, 8 models
   extracted + trained (phikon, exaone-path, mSTAR, conch, uni2, virchow, virchow2,
   gigapath); **hipt** now fixed by the 256×256 resize; **titan** load-only; **h-optimus**
   `NO-ACCESS`.
@@ -233,7 +235,8 @@ work whether submitted from the repo root or `jobs/`.
   sets batch/workers from the config's `compute:` block. Default `FINAL_CONFIG=tcga_tiled.yaml`
   (patch tiling, patches persisted+reused); set `FINAL_CONFIG=tcga_staged.yaml` for thumbnails.
 - **Patches persist** to `PFM_TCGA_ROOT/patches/` — tiled once, reused (no re-tile/re-download).
-  `jobs/download_tcga.sh` optionally pre-fills the SVS cache. All Python compiles; jobs `bash -n` clean.
+  `final_setup_mini.sh` runs extraction on a 1/`MINI_FRACTION` sample of those same patches.
+  All Python compiles; jobs `bash -n` clean.
 - No `$HOME`/group-storage dependencies at runtime; everything under `runtime/`.
 
 ## Compute / optimization (patch tiling)
@@ -251,9 +254,8 @@ work whether submitted from the repo root or `jobs/`.
    `IDH1`/`IDH2` — no bare `IDH`, so `idh` fills 0 and is skipped ("one class"). FIX:
    use `IDH1`/`IDH2` in the config genes and add matching entries in `tasks.py`.
 2. **h-optimus** needs an HF access grant to `bioptimus/H-optimus-0` (else disregarded).
-3. `tcga_streaming.yaml` has a stale group-path *comment*; the actual bind uses
-   `PFM_TCGA_ROOT`. Author TODOs in `downloader.py`/`manifest.py` are tech debt, not blockers.
-4. **Patches on Lustre.** Tiling persists ~1000 JPGs/slide (~142k files at full scale) under
+3. Author TODOs in `downloader.py`/`manifest.py` are tech debt, not blockers.
+4. **Patches on Lustre.** Tiling persists ~16k JPGs/slide (~2.26M files at full scale) under
    `PFM_TCGA_ROOT/patches/`; extraction reads them from `$SCRATCH` directly. Fine at this scale
    (≪ 20M-inode limit) but if reads become the bottleneck, stage to node-local or pack per-slide
    `.h5`. **Full-scale tiled extraction (~142k patches × 9 models) will not fit one 3 h GPU job** —

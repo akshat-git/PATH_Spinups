@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tcga_final
+#SBATCH --job-name=tcga_final_mini
 #SBATCH --partition=gpu
 #SBATCH -G 4
 #SBATCH --nodes=1            # FIX: force all 4 GPUs onto ONE node. Without this, -G 4 let
@@ -14,27 +14,29 @@
 #SBATCH --error=logs/%x_%j.err
 
 # =============================================================================
-#  final_setup.sh -- the FINAL end-to-end run on GPU with two-tier staged data.
+#  final_setup_mini.sh -- IDENTICAL to final_setup.sh, but extraction runs on only
+#  a 1/MINI_FRACTION SAMPLE (default 10%) of the persisted patch tiles. Same setup,
+#  same models, same benchmark -- ~10x less GPU work, so it fits a short walltime.
 #
-#  Data architecture:
-#    * Persistent tier ($SCRATCH, PFM_TCGA_ROOT): a stratified ~50 GB (~10% of
-#      TCGA) subset of FULL SVS slides, kept as a reusable cache in .../slides/.
-#    * Ephemeral tier ($L_SCRATCH / $TMPDIR, node-local SSD): each SVS is copied
-#      here just before it is thumbnailed, then evicted; the tiny thumbnails the
-#      GPU trains on are also staged here so the DataLoader reads node-local.
-#    * Async + resumable: downloads (to scratch) overlap thumbnailing across
-#      slides; a cached SVS is never re-downloaded and an existing thumbnail is
-#      skipped. So this DOWNLOADS THE SUBSET ONLY IF NEEDED -- otherwise it just
-#      accesses the cache and runs training.
+#  Fully self-bootstrapping / failsafe (an external party can run this on a fresh
+#  checkout): it builds every missing piece itself --
+#    * data-build container + venv        (STEP 1, via jobs/setup_tcga.sh)
+#    * the dataset: streams/tiles slides -> PATCHES persisted under
+#      $PFM_TCGA_ROOT/patches, + gene labels + dataset.csv   (STEP 2)
+#    * model container + one venv per model (STEP 3, via pfm_setup.sh, idempotent)
+#  Nothing is assumed to pre-exist; already-built pieces are detected and reused.
 #
-#  Flow:  ensure data container/venv -> build the dataset, tiling each SVS into
-#         tissue PATCHES that PERSIST under $PFM_TCGA_ROOT/patches (tiled once,
-#         reused every run) -> ensure model container + per-model venvs
-#         -> stage the persisted patches to node-local -> extract embeddings for
-#         every model (GPU) -> benchmark (train probes).
+#  The ONLY difference from final_setup.sh: STEP 4 stages a 1/MINI_FRACTION sample
+#  of the tiles to the node-local SSD. Tiling in STEP 2 still persists the FULL set,
+#  so final_setup.sh can later use all of them -- nothing is thrown away.
 #
-#  Submit:  mkdir -p logs && sbatch jobs/final_setup.sh
-#  Knobs:   FINAL_CONFIG (default configs/tcga_tiled.yaml; set tcga_staged.yaml for
+#  Flow:  ensure data container/venv -> build dataset (tile+persist ALL patches)
+#         -> ensure model container + per-model venvs -> stage a 1/N SAMPLE of the
+#         patches to node-local SSD -> extract (GPU) -> benchmark (train probes).
+#
+#  Submit:  mkdir -p logs && sbatch jobs/final_setup_mini.sh
+#  Knobs:   MINI_FRACTION (default 10 -> use 1/10 of the patches)
+#           FINAL_CONFIG (default configs/tcga_tiled.yaml; set tcga_staged.yaml for
 #           the coarse 1-thumbnail/slide path)   FINAL_TARGET_GB (config default: 50)
 #           PFM_TCGA_ROOT (cache + persisted patches location)
 # =============================================================================
@@ -95,11 +97,17 @@ DATASET="$TCGA/tables/dataset.csv"
 # for the coarse 1-thumbnail/slide path instead.
 CONFIG="${FINAL_CONFIG:-configs/tcga_tiled.yaml}"
 
+# MINI: extraction uses only 1 in MINI_FRACTION of the persisted patches (default 10 = 10%).
+# STEP 2 still tiles+persists the FULL set; only STEP 4's node-local sample is reduced. Clamp
+# a bad value (non-integer or 0) back to 10 so the run can never divide-by-zero / stage all.
+MINI_FRACTION="${MINI_FRACTION:-10}"
+case "$MINI_FRACTION" in ''|*[!0-9]*|0) MINI_FRACTION=10;; esac
+
 hr(){ echo "============================================================"; }
-fail(){ echo; echo "FINAL SETUP ABORTED at: $*"; echo "=== end: $(date) ==="; exit 1; }
+fail(){ echo; echo "FINAL SETUP MINI ABORTED at: $*"; echo "=== end: $(date) ==="; exit 1; }
 
 hr
-echo " FINAL SETUP — tile SVS -> persist patches -> all models -> train  ($CONFIG)"
+echo " FINAL SETUP MINI — tile SVS -> persist patches -> extract 1/$MINI_FRACTION -> train  ($CONFIG)"
 echo "   node:        $(hostname)"
 echo "   job:         ${SLURM_JOB_ID:-interactive}"
 echo "   repo:        $REPO"
@@ -167,8 +175,8 @@ echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built
 ( cd "$REPO" && bash pfm_setup.sh setup ) \
   || echo "  WARN: one or more model venvs failed to set up (see log above); continuing."
 
-# ── STEP 4: stage the persisted tiles scratch -> node-local SSD, feed the GPU ─
-echo; echo "### STEP 4/5  stage tiles to node-local SSD ($STAGE) for the GPU"
+# ── STEP 4: stage a 1/MINI_FRACTION SAMPLE of the tiles -> node-local SSD ─────
+echo; echo "### STEP 4/5  stage a 1/$MINI_FRACTION sample of the tiles to node-local SSD ($STAGE)"
 PATCHES_SCRATCH="$TCGA/patches"   # persistent: tiled once by tile_slides, reused every run
 INPUT_MODE=""                     # set below: "patches" (intended) or a THUMBNAIL fallback
 # NB: count without `head` -- under `set -o pipefail`, `find | head` makes find die
@@ -198,32 +206,39 @@ if [ -n "${L_SCRATCH:-}" ] && [ -d "${L_SCRATCH:-}" ]; then SSD_OK=1; fi
 [ "$SSD_OK" -eq 1 ] || echo "  NOTE: no node-local SSD (\$L_SCRATCH) here; staging target $STAGE is on Lustre."
 
 if [ "${npatch:-0}" -ge 1 ]; then
-  # Stage ALL tiles onto the node-local SSD once, then the GPU reads them from fast local
-  # NVMe. With N models each sweeping every patch, one scratch->SSD copy beats N Lustre
-  # read passes -- this is what keeps extraction COMPUTE-bound (GPU), not I/O-bound.
-  PATCHES_LOCAL="$STAGE/tcga_patches"
+  # Stage only a 1/MINI_FRACTION SAMPLE of the tiles onto the node-local SSD, then the GPU
+  # reads them from fast local NVMe. That is ~1/MINI_FRACTION the GPU work of the full run
+  # while staying COMPUTE-bound (SSD reads), so it fits a short walltime.
+  PATCHES_LOCAL="$STAGE/tcga_patches_mini"
   mkdir -p "$PATCHES_LOCAL"
-  echo "  staging $npatch tiles: $PATCHES_SCRATCH (Lustre) -> $PATCHES_LOCAL (node-local SSD)"
-  ( cd "$PATCHES_SCRATCH" && tar -cf - . ) 2>/dev/null | ( cd "$PATCHES_LOCAL" && tar -xf - ) 2>/dev/null || true
-  # Require a COMPLETE stage: if fewer tiles land than exist (usually the SSD filled up),
-  # reading from the SSD would silently DROP the missing patches. Fall back to the
-  # complete set on scratch -- correct, but I/O may then bottleneck the GPU.
+  FILELIST="$STAGE/mini_patchlist.txt"
+  # Deterministic 1/MINI_FRACTION sample across the SORTED patch list. Sorting groups a
+  # slide's patches together, so every-Nth spreads the sample across ALL slides -- benchmark
+  # still mean-pools each slide's kept patches into a slide-level vector for the probe.
+  ( cd "$PATCHES_SCRATCH" && find . -mindepth 2 -name '*.jpg' 2>/dev/null | sort \
+      | awk -v f="$MINI_FRACTION" 'f<=1 || NR % f == 0' ) > "$FILELIST"
+  nsel=$(wc -l < "$FILELIST" 2>/dev/null); nsel=${nsel:-0}
+  echo "  MINI: staging $nsel of $npatch tiles (1/$MINI_FRACTION): $PATCHES_SCRATCH -> $PATCHES_LOCAL (node-local SSD)"
+  ( cd "$PATCHES_SCRATCH" && tar -cf - -T "$FILELIST" ) 2>/dev/null | ( cd "$PATCHES_LOCAL" && tar -xf - ) 2>/dev/null || true
+  # Require a COMPLETE stage of the SAMPLE: an incomplete SSD copy would silently drop
+  # sampled patches. If it fails, fall back to the FULL set on scratch (the sampled subset
+  # lives only on the SSD, so it can't be cleanly re-read from Lustre) -- big + slow.
   nstaged=$(find "$PATCHES_LOCAL" -mindepth 2 -name '*.jpg' 2>/dev/null | wc -l)
-  if [ "$SSD_OK" -eq 1 ] && [ "${nstaged:-0}" -ge "$npatch" ]; then
+  if [ "$SSD_OK" -eq 1 ] && [ "${nstaged:-0}" -ge "$nsel" ] && [ "${nstaged:-0}" -ge 1 ]; then
     export PFM_PATCH_DIR="$PATCHES_LOCAL"
-    INPUT_MODE="patches ($nstaged tiles, node-local SSD)"
-    echo "  OK: all $nstaged tiles on SSD; GPU reads node-local -> compute-bound: $PFM_PATCH_DIR"
+    INPUT_MODE="patches ($nstaged of $npatch = 1/$MINI_FRACTION sample, node-local SSD)"
+    echo "  OK: $nstaged sampled tiles on SSD; GPU reads node-local -> compute-bound: $PFM_PATCH_DIR"
   else
     export PFM_PATCH_DIR="$PATCHES_SCRATCH"
-    INPUT_MODE="patches ($npatch tiles, SCRATCH/Lustre -- SSD staging $nstaged/$npatch) -- SLOW FALLBACK"
+    INPUT_MODE="patches (FULL $npatch tiles, SCRATCH/Lustre -- mini SSD staging $nstaged/$nsel) -- SLOW FALLBACK"
     if [ "$SSD_OK" -ne 1 ]; then
-      fallback_banner "reading patch tiles from Lustre scratch, not a node-local SSD" \
-        "No \$L_SCRATCH on this node, so tiles were not staged locally." \
-        "extraction is I/O-bound on Lustre, NOT compute-bound (GPU may starve)."
+      fallback_banner "no node-local SSD; reading the FULL patch set off Lustre (mini sample not staged)" \
+        "No \$L_SCRATCH on this node, so the 1/$MINI_FRACTION sample could not be staged locally." \
+        "extraction runs on ALL $npatch tiles off Lustre -- slow AND I/O-bound; the mini speedup is lost."
     else
-      fallback_banner "reading patch tiles from Lustre scratch, not the node-local SSD" \
-        "Only $nstaged/$npatch tiles reached the SSD ($STAGE) -- likely full." \
-        "reading the complete set from Lustre; extraction may be I/O-bound, not compute-bound."
+      fallback_banner "mini SSD staging incomplete; reading the FULL patch set off Lustre" \
+        "Only $nstaged/$nsel sampled tiles reached the SSD ($STAGE) -- likely full." \
+        "extraction runs on ALL $npatch tiles off Lustre -- slow AND I/O-bound; the mini speedup is lost."
     fi
   fi
   # compute knobs (batch/workers/amp/prefetch) come from the config spec -> STEP 5.
@@ -279,7 +294,7 @@ echo; echo "  --- benchmark: train a linear probe per (model x task) ---"
   || echo "  WARN: benchmark returned nonzero (often 'too few labelled samples')."
 
 echo; hr
-echo " FINAL SETUP COMPLETE"
+echo " FINAL SETUP MINI COMPLETE  (extraction on 1/$MINI_FRACTION of the tiles)"
 echo "   dataset:    $DATASET"
 echo "   input used: ${INPUT_MODE:-unknown}"
 echo "   SVS cache:  $TCGA/slides   ($(du -sh "$TCGA/slides" 2>/dev/null | cut -f1 || echo n/a))"

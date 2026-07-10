@@ -43,3 +43,6 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
+# ── Junk from an unquoted `pip install pkg>=1.2` (creates a file literally named "=1.2")
+=*

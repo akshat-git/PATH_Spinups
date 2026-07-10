@@ -126,5 +126,5 @@ openslide-python>=1.4.3 openslide-bin>=4.0.0.11 tifffile>=2024.1.30 pyarrow tqdm
 
     echo ''
     echo 'INFO: Setup completed successfully!'
-    echo 'INFO: Next step: sbatch jobs/build_tcga_dataset.sh'
+    echo 'INFO: Next step: sbatch jobs/final_setup.sh   (or jobs/final_setup_mini.sh)'
 "

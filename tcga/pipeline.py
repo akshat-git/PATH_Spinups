@@ -336,7 +336,7 @@ class TCGADatasetBuilder:
         """Pre-download the FULL SVS of the staged subset into the persistent
         $SCRATCH cache (slides_dir), so a later staged run thumbnails from disk
         instead of streaming from GDC. This is the standalone "download all of TCGA"
-        entry point (jobs/download_tcga.sh); the staged pipeline's hybrid then reuses
+        entry point (the download_svs_cache step); the staged pipeline's hybrid then reuses
         whatever is cached and streams only the rest.
         """
         from tcga.slide_stager import predownload_svs

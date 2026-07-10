@@ -44,8 +44,8 @@ there is **no `gdc-client` binary** anywhere.
 | `gene_matrix` | `gene_matrix.py` | MAF files → per-gene 0/1 matrix |
 | `assemble` | `pipeline.py` | slide table + gene matrix → `dataset.csv` |
 
-Default configs: `configs/tcga_staged.yaml` uses `stage_process` (the real
-run); `configs/tcga_streaming.yaml` uses `stream_thumbnails` (lightweight).
+Default configs: `configs/tcga_tiled.yaml` uses `tile_slides` (the real GPU-bound
+run, default); `configs/tcga_staged.yaml` uses `stage_process` (1 thumbnail/slide).
 
 ---
 
@@ -105,7 +105,7 @@ so subtype tasks aren't degenerate:
    (local disk never holds more than `stage_download_workers` slides at once)
 ```
 
-**B. Range-streaming** — `slide_streamer.py` (`stream_thumbnails`, `tcga_streaming.yaml`):
+**B. Range-streaming** — `slide_streamer.py` (`stream_thumbnails` step; no config ships by default):
 
 ```
    HTTPRangeFile(GDC /data/<file_id>) ── serves only requested byte ranges ──►
@@ -139,7 +139,7 @@ the model half joins its embeddings by `slide_id = basename(jpg_path)` (no exten
 | `download.slides` | `false` in both configs — slides come via `stage_process`/`stream_thumbnails` |
 | `download.maf` | download MAF files for gene labels |
 | `download.target_gb` | staged subset size (byte budget) — FINAL run |
-| `download.max_files` | subset by slide count — proof/smoke |
+| `download.max_files` | subset by slide count (instead of `target_gb`) |
 | `slides.thumbnail_size` | thumbnail dims (default 512×512) |
 | `slides.stage_download_workers` | concurrent SVS download+stage workers |
 | `slides.stream_fallback` | range-stream: full-download fallback if a thumbnail can't be range-read |
@@ -149,15 +149,15 @@ the model half joins its embeddings by `slide_id = basename(jpg_path)` (no exten
 ## CLI
 
 ```bash
-python -m build_tcga_dataset --config configs/tcga_staged.yaml    # staged full-SVS
-python -m build_tcga_dataset --config configs/tcga_streaming.yaml  # range-streaming
-python -m build_tcga_dataset --steps etl,manifest --dry-run              # inspect, no execute
-python -m build_tcga_dataset --config configs/tcga_staged.yaml download.target_gb=20
+python -m build_tcga_dataset --config configs/tcga_tiled.yaml     # patch tiling (default)
+python -m build_tcga_dataset --config configs/tcga_staged.yaml    # staged full-SVS → thumbnails
+python -m build_tcga_dataset --steps etl,manifest --dry-run       # inspect, no execute
+python -m build_tcga_dataset --config configs/tcga_tiled.yaml download.target_gb=20
 ```
 
-On the cluster: `jobs/final_setup.sh` (staged, GPU, end-to-end incl. training) or
-`jobs/build_tcga_dataset.sh` (data only, CPU). See the top-level `README.md` for the
-full model-side pipeline (extraction → benchmark → leaderboard).
+On the cluster: `jobs/final_setup.sh` (or `jobs/final_setup_mini.sh`) runs this data
+build and then the full GPU pipeline (extraction → benchmark → leaderboard) end-to-end.
+See the top-level `README.md`.
 
 ---
 

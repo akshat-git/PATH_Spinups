@@ -198,7 +198,7 @@ def acquire_stage_process(df, cache_dir, stage_dir, thumbnails_dir, size=(512, 5
             return sid, None, "failed", False, None
         try:
             # HYBRID, "use the download if available": if the full SVS is already in
-            # the persistent $SCRATCH cache (populated by jobs/download_tcga.sh),
+            # the persistent $SCRATCH cache (populated by the download_svs_cache step),
             # thumbnail from it with no network -- regardless of stream_to_local.
             cached = (cache_dir / fid).is_dir() and any((cache_dir / fid).iterdir())
             if cached:
@@ -267,7 +267,7 @@ def predownload_svs(df, cache_dir, workers=6, token=None, file_id_col="file_id",
     ``cache_dir/<file_id>/<filename>``, concurrently and resumably (a file already
     present is not re-downloaded).
 
-    This is the "download all of TCGA" path (jobs/download_tcga.sh). Run it once and
+    This is the "download all of TCGA" path (the download_svs_cache pipeline step). Run it once and
     a later staged run reuses these cached SVS (thumbnailing from disk, no network)
     via the hybrid in ``acquire_stage_process``; slides NOT pre-downloaded are
     streamed on demand instead. Returns a counts dict.
