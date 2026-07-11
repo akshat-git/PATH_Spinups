@@ -68,8 +68,11 @@ def labels_for_task(dataset_csv, task):
                     f"{dataset_csv} has no 'slide_id' column -- is it the TCGA ETL "
                     f"dataset.csv? (columns: {list(r.keys())[:8]}...)"
                 )
-            if not r.get("jpg_path"):
-                continue  # no thumbnail -> no embedding -> unusable
+            # Do NOT gate on jpg_path. The thumbnail workflow sets jpg_path, but the
+            # TILED workflow keys patches by slide_id and leaves jpg_path unset -- gating
+            # on it dropped every tiled slide, so the benchmark saw "no labelled rows".
+            # benchmark_one only uses labels for slides that actually have embeddings
+            # (joined by slide_id), so labelling a slide with no embedding is harmless.
             if cfg.get("require_maf") and not _truthy(r.get("has_maf", "")):
                 continue
             if "filter_values" in cfg and r.get(cfg["filter_col"]) not in cfg["filter_values"]:
