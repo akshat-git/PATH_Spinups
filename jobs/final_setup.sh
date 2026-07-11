@@ -10,7 +10,8 @@
 #SBATCH --mem=48G            # RAM = bounded DataLoader prefetch window (workers x prefetch x
                              # batch), INDEPENDENT of dataset size -- identical for mini & full.
                              # Covers all 4 model procs' windows on this node (streaming, no preload).
-#SBATCH --time=03:00:00
+#SBATCH --time=2-00:00:00    # full run = ALL ~2.26M patches x ~9 models; ~10-16h even with
+                             # the work-queue scheduler, so use the gpu partition's 2-day max.
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 

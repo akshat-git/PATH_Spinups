@@ -493,27 +493,44 @@ cmd_run() {
   local targets=("$@"); [[ ${#targets[@]} -eq 0 ]] && targets=("${MODELS[@]}")
   local rc_worst=0 rc
 
-  # PFM_RUN_GPUS>1: spread models across GPUs, one model per GPU, in waves of N.
-  # Each model process is pinned with CUDA_VISIBLE_DEVICES (0..N-1, relative to the
-  # SLURM allocation). Independent models => near-linear speedup up to N GPUs.
+  # PFM_RUN_GPUS>1: run one model per GPU via a WORK QUEUE. A GPU takes the next
+  # pending model the INSTANT it frees, instead of waiting for a whole "wave" to finish.
+  # The old wave scheme blocked on the slowest model in each wave while the other GPUs
+  # sat idle (e.g. virchow at 64 patches/s stalling 3 GPUs); the queue keeps every GPU
+  # busy, so makespan drops to ~max(total_work/N, slowest_single_model).
+  # Each model is pinned with CUDA_VISIBLE_DEVICES (0..N-1, relative to the SLURM alloc).
+  # Completion is detected via a per-GPU rc-file: `kill -0` can't tell a finished child
+  # from a zombie, so the wrapper writes run_one's exit code on exit and we poll for it.
   local ngpu="${PFM_RUN_GPUS:-1}"
   if [[ "$ngpu" -gt 1 ]]; then
-    log "run: ${#targets[@]} models across $ngpu GPUs (one model/GPU, waves of $ngpu)"
-    local n=${#targets[@]} idx=0
-    while [[ $idx -lt $n ]]; do
-      local pids=() g=0
-      while [[ $g -lt $ngpu && $idx -lt $n ]]; do
-        local m="${targets[$idx]}"
-        log "[$m] -> GPU $g"
-        CUDA_VISIBLE_DEVICES="$g" run_one "$m" &
-        pids+=($!)
-        g=$((g+1)); idx=$((idx+1))
+    log "run: ${#targets[@]} models across $ngpu GPUs (work queue -- a GPU takes the next model the instant it frees)"
+    local qn=${#targets[@]} qi=0 remaining=${#targets[@]}
+    local rcdir; rcdir="$(mktemp -d "${TMPDIR:-/tmp}/pfm_run.XXXXXX")"
+    local -a gpid=() gmodel=(); local g
+    for ((g=0; g<ngpu; g++)); do gpid[$g]=""; gmodel[$g]=""; done
+    while (( remaining > 0 )); do
+      local did=0
+      for ((g=0; g<ngpu; g++)); do
+        # reap a GPU whose model finished (its rc-file appeared)
+        if [[ -n "${gpid[$g]}" && -f "$rcdir/g$g.rc" ]]; then
+          rc="$(cat "$rcdir/g$g.rc")"; rm -f "$rcdir/g$g.rc"
+          wait "${gpid[$g]}" 2>/dev/null || true
+          [[ "$rc" -ne 0 && $rc_worst -ne 75 ]] && rc_worst=$rc
+          log "[${gmodel[$g]}] finished on GPU $g (rc=$rc)"
+          gpid[$g]=""; gmodel[$g]=""; remaining=$(( remaining - 1 )); did=1
+        fi
+        # hand a free GPU the next queued model
+        if [[ -z "${gpid[$g]}" && $qi -lt $qn ]]; then
+          local m="${targets[$qi]}"; qi=$(( qi + 1 ))
+          log "[$m] -> GPU $g"
+          ( CUDA_VISIBLE_DEVICES="$g" run_one "$m"; echo $? > "$rcdir/g$g.rc" ) &
+          gpid[$g]=$!; gmodel[$g]="$m"; did=1
+        fi
       done
-      for p in "${pids[@]}"; do
-        if ! wait "$p"; then rc=$?; [[ $rc_worst -ne 75 ]] && rc_worst=$rc; fi
-      done
+      (( did == 0 )) && sleep 5   # all GPUs busy, none finished -> poll (coarse, cheap)
     done
-    log "run(parallel) done across $ngpu GPUs (worst rc=$rc_worst)"
+    rm -rf "$rcdir" 2>/dev/null || true
+    log "run(work-queue) done across $ngpu GPUs (worst rc=$rc_worst)"
     return $rc_worst
   fi
 
