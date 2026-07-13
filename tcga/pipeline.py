@@ -428,9 +428,10 @@ class TCGADatasetBuilder:
 
         local = os.environ.get("L_SCRATCH") or str(self.tcga_config.data_dir / "_stage")
         stage_dir = Path(local) / "tcga_stage"                                   # node-local: transient SVS
-        # Patches PERSIST on scratch so they are tiled once and reused; a later run
-        # loads them and skips tiling entirely (fallback: patches -> cached SVS -> stream).
-        patches_dir = Path(patch_cfg.get("patches_dir") or (self.tcga_config.data_dir / "patches"))
+        # Patches PERSIST on scratch as one tar per slide (patches_tar/<sid>.tar), tiled once
+        # and reused; a later run skips tiling entirely. Writing tars directly (not loose
+        # files) avoids millions of tiny files -- the metadata storm that made staging slow.
+        patches_dir = Path(patch_cfg.get("patches_dir") or (self.tcga_config.data_dir / "patches_tar"))
 
         counts = acquire_tile_process(
             subset_df, self.tcga_config.slides_dir, stage_dir, patches_dir,

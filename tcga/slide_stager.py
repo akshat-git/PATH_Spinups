@@ -328,9 +328,17 @@ def acquire_tile_process(df, cache_dir, stage_dir, patches_dir, patch_size=256,
     def work(row):
         sid = row[slide_id_col]
         fid = row[file_id_col]
-        sdir = patches_dir / sid
-        if sdir.exists() and any(sdir.glob("*.jpg")):
-            return sid, "skipped", len(list(sdir.glob("*.jpg")))
+        # tile_slide writes one tar per slide (patches_dir/<sid>.tar + .done sentinel);
+        # a slide already tiled is skipped without re-reading the SVS.
+        tar_path = patches_dir / f"{sid}.tar"
+        done_path = patches_dir / f"{sid}.done"
+        if tar_path.exists() and done_path.exists():
+            try:
+                n = int(done_path.read_text().strip())
+            except ValueError:
+                n = 0
+            if n > 0:
+                return sid, "skipped", n
         if not fid:
             return sid, "failed", 0
         try:

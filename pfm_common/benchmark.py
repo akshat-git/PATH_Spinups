@@ -71,22 +71,28 @@ def benchmark_one(emb_path, labels, n_classes, val_frac, epochs, lr, seed, min_s
     from collections import OrderedDict
 
     blob = torch.load(emb_path, map_location="cpu", weights_only=False)
-    X, paths = blob["embeddings"].float(), blob["paths"]
+    X = blob["embeddings"].float()
 
-    # Aggregate to slide level (mean-pool the slide's patches into one vector). For
-    # 1-thumbnail-per-slide this is a no-op; for tiled patches it pools each slide's
-    # patches so the probe trains one sample per slide -- no patch leakage across the
-    # train/val split, and the standard patch->slide aggregation for PFM benchmarks.
-    by_slide = OrderedDict()
-    for i, p in enumerate(paths):
-        by_slide.setdefault(_slide_id(p), []).append(i)
-
+    # One vector per slide. New format: extraction already mean-pooled to slide level, so
+    # blob["slide_ids"][i] labels X[i] directly. Legacy format: blob["paths"] are per-patch,
+    # so mean-pool each slide's patches here. Either way the probe trains one sample/slide
+    # (no patch leakage across the train/val split) -- the standard PFM aggregation.
     slide_vecs, y = [], []
-    for sid, idxs in by_slide.items():
-        lab = labels.get(sid)
-        if lab is not None:
-            slide_vecs.append(X[idxs].mean(dim=0))
-            y.append(int(lab))
+    if "slide_ids" in blob:
+        for i, sid in enumerate(blob["slide_ids"]):
+            lab = labels.get(sid)
+            if lab is not None:
+                slide_vecs.append(X[i])
+                y.append(int(lab))
+    else:
+        by_slide = OrderedDict()
+        for i, p in enumerate(blob["paths"]):
+            by_slide.setdefault(_slide_id(p), []).append(i)
+        for sid, idxs in by_slide.items():
+            lab = labels.get(sid)
+            if lab is not None:
+                slide_vecs.append(X[idxs].mean(dim=0))
+                y.append(int(lab))
     if len(y) < min_samples:
         return {"skipped": f"only {len(y)} labelled slides (< {min_samples})"}
     if len(set(y)) < 2:

@@ -60,25 +60,37 @@ def _tissue_mask(thumb_rgb, dark_min=15):
 
 def tile_slide(svs_path, out_dir, slide_id, patch_size=256, level=0,
                tissue_thresh=0.10, thumb_max_dim=2048, jpeg_quality=85):
-    """Cut ``svs_path`` into tissue patches under ``out_dir/<slide_id>/``.
-
-    Grid step = ``patch_size`` at ``level``. **Every** cell whose tissue fraction (from
-    the Otsu mask) exceeds ``tissue_thresh`` is kept -- no cap, no subsampling. Each kept
-    cell is read at ``level`` and saved as ``<slide_id>__x<X>_y<Y>.jpg`` (X,Y are level-0
+    """Cut ``svs_path`` into tissue patches, writing them DIRECTLY into one tar per slide:
+    ``out_dir/<slide_id>.tar`` (members named ``<slide_id>__x<X>_y<Y>.jpg``; X,Y are level-0
     coords, so patches carry their provenance).
 
-    Returns the number of patches written. Resumable: if the slide dir already holds
-    patches, returns that count without re-tiling.
+    Grid step = ``patch_size`` at ``level``. **Every** cell whose tissue fraction (from the
+    Otsu mask) exceeds ``tissue_thresh`` is kept -- no cap, no subsampling.
+
+    Writing straight into the tar as patches are cut means millions of loose files never
+    touch the filesystem (no inode blow-up, no later pack step, no Lustre metadata storm).
+    Returns the patch count. Resumable/atomic: if ``<slide_id>.tar`` + ``<slide_id>.done``
+    exist, return the recorded count without re-tiling; a partial tar is written to
+    ``.tar.part`` and renamed only on completion.
     """
+    import io
+    import tarfile
+
     import openslide
 
-    out_dir = Path(out_dir) / slide_id
-    existing = sorted(out_dir.glob("*.jpg")) if out_dir.exists() else []
-    if existing:
-        return len(existing)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = out_dir / f"{slide_id}.tar"
+    done_path = out_dir / f"{slide_id}.done"
+    if tar_path.exists() and done_path.exists():
+        try:
+            return int(done_path.read_text().strip())
+        except ValueError:
+            pass  # corrupt sentinel -> re-tile
 
     slide = openslide.OpenSlide(str(svs_path))
+    tmp = tar_path.with_name(tar_path.name + ".part")
+    written = 0
     try:
         level = min(level, slide.level_count - 1)
         W, H = slide.level_dimensions[level]
@@ -91,28 +103,31 @@ def tile_slide(svs_path, out_dir, slide_id, patch_size=256, level=0,
         thumb = slide.get_thumbnail((tw, th)).convert("RGB")
         mask = _tissue_mask(np.asarray(thumb))
         mh, mw = mask.shape
-        # thumbnail px per patch-side (patch_size at `level` -> thumbnail scale)
-        pm = max(1, int(round(patch_size / scale)))
+        pm = max(1, int(round(patch_size / scale)))      # thumbnail px per patch side
 
         nx, ny = W // patch_size, H // patch_size
-        candidates = []
-        for gy in range(ny):
-            for gx in range(nx):
-                ty0, tx0 = int(gy * pm), int(gx * pm)
-                cell = mask[ty0:min(ty0 + pm, mh), tx0:min(tx0 + pm, mw)]
-                if cell.size and cell.mean() >= tissue_thresh:
-                    candidates.append((gx, gy))
-
-        written = 0
-        for gx, gy in candidates:
-            x0 = int(gx * patch_size * ds_l)             # level-0 coords for read_region
-            y0 = int(gy * patch_size * ds_l)
-            patch = slide.read_region((x0, y0), level, (patch_size, patch_size)).convert("RGB")
-            patch.save(out_dir / f"{slide_id}__x{x0}_y{y0}.jpg", "JPEG", quality=jpeg_quality)
-            written += 1
+        with tarfile.open(tmp, "w") as tf:               # no compression: JPGs are compressed
+            for gy in range(ny):
+                for gx in range(nx):
+                    ty0, tx0 = int(gy * pm), int(gx * pm)
+                    cell = mask[ty0:min(ty0 + pm, mh), tx0:min(tx0 + pm, mw)]
+                    if not (cell.size and cell.mean() >= tissue_thresh):
+                        continue
+                    x0 = int(gx * patch_size * ds_l)     # level-0 coords for read_region
+                    y0 = int(gy * patch_size * ds_l)
+                    patch = slide.read_region((x0, y0), level, (patch_size, patch_size)).convert("RGB")
+                    buf = io.BytesIO()
+                    patch.save(buf, "JPEG", quality=jpeg_quality)
+                    data = buf.getvalue()
+                    info = tarfile.TarInfo(name=f"{slide_id}__x{x0}_y{y0}.jpg")
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                    written += 1
     finally:
         slide.close()
 
-    logger.info("tiled %s -> %d tissue patches (level=%d, %dpx)", slide_id, written,
-                level, patch_size)
+    tmp.rename(tar_path)
+    done_path.write_text(str(written))
+    logger.info("tiled %s -> %s (%d tissue patches, level=%d, %dpx)", slide_id, tar_path.name,
+                written, level, patch_size)
     return written

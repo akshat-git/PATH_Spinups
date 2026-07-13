@@ -113,7 +113,19 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
         dl_kwargs["prefetch_factor"] = config.PREFETCH_FACTOR   # stage batches ahead (H2D overlap)
     loader = DataLoader(ds, **dl_kwargs)
 
-    feats, ids = [], []
+    # Mean-pool to SLIDE level DURING extraction: keep a running sum + count per slide
+    # instead of retaining every patch vector. The benchmark trains one sample per slide
+    # (mean of its patches) anyway, so this is mathematically identical -- but the saved
+    # file is ~N_slides vectors (~MB) not N_patches (100s of GB at scale), so it never
+    # OOMs the benchmark's torch.load. slide_id = basename before the "__x_y" patch suffix.
+    from collections import OrderedDict
+
+    def _sid(p):
+        return os.path.splitext(os.path.basename(p))[0].split("__", 1)[0]
+
+    sums = OrderedDict()      # sid -> running sum Tensor[D] (float32, CPU)
+    counts = OrderedDict()    # sid -> int
+    n_seen = 0
     amp_enabled, amp_dtype = _resolve_amp(dev)
     print(f"[{name}] batch={config.BATCH_SIZE} workers={config.NUM_WORKERS} "
           f"autocast={'off' if not amp_enabled else amp_dtype}", flush=True)
@@ -123,18 +135,32 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
         with torch.inference_mode():
             with torch.autocast(device_type=dev, dtype=amp_dtype, enabled=amp_enabled):
                 out = embed_fn(model, batch)
-        feats.append(out.float().cpu())
-        ids.extend(paths)
+        out = out.float().cpu()                      # [B, D]
+        for i, p in enumerate(paths):
+            sid = _sid(p)
+            if sid in sums:
+                sums[sid] += out[i]
+                counts[sid] += 1
+            else:
+                sums[sid] = out[i].clone()
+                counts[sid] = 1
+        n_seen += len(paths)
         if bi % 10 == 0:
-            print(f"[{name}] batch {bi+1} ({len(ids)} imgs)", flush=True)
+            print(f"[{name}] batch {bi+1} ({n_seen} patches, {len(sums)} slides)", flush=True)
 
-    embeddings = torch.cat(feats, 0)
+    if not sums:
+        print(f"[{name}] no patches produced -- nothing to save.", flush=True)
+        return None
+    slide_ids = list(sums.keys())
+    embeddings = torch.stack([sums[s] / counts[s] for s in slide_ids], 0)   # [N_slides, D]
     out_dir = config.output_dir_for(name)
     out_path = os.path.join(out_dir, "patch_embeddings.pt")
-    torch.save({"model": name, "embeddings": embeddings, "paths": ids}, out_path)
+    torch.save({"model": name, "embeddings": embeddings, "slide_ids": slide_ids,
+                "patch_counts": [counts[s] for s in slide_ids], "n_patches": n_seen}, out_path)
     print(
-        f"[{name}] saved embeddings {tuple(embeddings.shape)} for {len(ids)} images "
-        f"-> {out_path}  ({time.time()-t0:.1f}s)",
+        f"[{name}] saved slide-level embeddings {tuple(embeddings.shape)} "
+        f"({len(slide_ids)} slides, mean-pooled from {n_seen} patches) -> {out_path} "
+        f"({time.time()-t0:.1f}s)",
         flush=True,
     )
     return out_path
