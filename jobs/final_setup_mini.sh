@@ -252,6 +252,10 @@ echo "  input mode: $INPUT_MODE  (stride 1/${PFM_PATCH_STRIDE})"
 # spec's `compute:` block -- nothing hardcoded here.
 NGPU=$(nvidia-smi -L 2>/dev/null | wc -l); NGPU=${NGPU:-1}; [ "$NGPU" -lt 1 ] && NGPU=1
 export PFM_RUN_GPUS="$NGPU"
+# DATA-PARALLEL like the full run: shard each model across all $NGPU GPUs (same code path),
+# so the mini exercises the exact scheduler the full run uses. Override PFM_RUN_MODE=queue for
+# the one-model-per-GPU work queue.
+export PFM_RUN_MODE="${PFM_RUN_MODE:-shard}"
 CPT="${SLURM_CPUS_PER_TASK:-1}"
 
 # Read the compute spec from the config (via the tcga_build venv's omegaconf).
