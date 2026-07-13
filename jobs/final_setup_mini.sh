@@ -10,7 +10,9 @@
 #SBATCH --mem=48G            # RAM = bounded DataLoader prefetch window (workers x prefetch x
                              # batch), INDEPENDENT of dataset size -- identical for mini & full.
                              # Covers all 4 model procs' windows on this node (streaming, no preload).
-#SBATCH --time=03:00:00
+#SBATCH --time=00:30:00      # 1% run needs ~12-15 min (tar-stage + work-queue + benchmark);
+                             # 30 min is 2x margin and backfills faster. Raise MINI_FRACTION-
+                             # dependent: a bigger sample (smaller MINI_FRACTION) needs more.
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
