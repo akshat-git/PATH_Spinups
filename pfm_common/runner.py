@@ -80,10 +80,11 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
     model = model.eval().to(dev)
     print(f"[{name}] model ready.", flush=True)
 
-    # Stream tiles: never list/preload the dataset. resolve_patch_root() confirms
-    # there is data (pulling just the first path); the count is a one-time O(1)-memory
-    # metadata pass so we can log the FULL tile count up front (proves no cap).
-    root, recursive = data.resolve_patch_root()
+    # Stream tiles: never list/preload the dataset. resolve_patch_root() confirms there is
+    # data (pulling just the first shard/path) and picks tar-shard mode (preferred) or the
+    # loose-file fallback. The count is a one-time O(1)-memory pass so we log the tile count
+    # (after stride) up front. PFM_PATCH_STRIDE keeps every Nth tile (1=all; mini=10).
+    mode, root, recursive = data.resolve_patch_root()
     if root is None:
         print(
             f"[{name}] Model + weights loaded OK, but no TCGA patch images were found.\n"
@@ -92,15 +93,16 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
             flush=True,
         )
         return None
-    n_imgs = data.count_patch_images(root, recursive)
-    cap = config.MAX_IMAGES or 0
-    print(f"[{name}] streaming {n_imgs} images from {root}"
-          f"{f' (capped at {cap})' if cap else ' (no cap)'}.", flush=True)
+    stride = max(1, config.PATCH_STRIDE)
+    n_fed = data.count_patch_images(mode, root, recursive, stride=stride)
+    src = "tar shards" if mode == "tars" else "loose files"
+    print(f"[{name}] streaming {n_fed} tiles from {root} ({src}"
+          f"{f', stride 1/{stride}' if stride > 1 else ', no cap'}).", flush=True)
 
-    # Streaming IterableDataset: RAM = bounded prefetch window, independent of N.
-    # Every tile is produced by exactly one worker (stride-sharded), so all tiles are
+    # Streaming IterableDataset: RAM = bounded prefetch window, independent of N. Every
+    # tile is produced by exactly one worker (tar/stride sharded), so all fed tiles are
     # extracted exactly once -- no duplicates, no drops (no drop_last either).
-    ds = data.make_streaming_dataset(transform)
+    ds = data.make_streaming_dataset(transform, stride=stride)
     dl_kwargs = dict(
         batch_size=config.BATCH_SIZE,
         num_workers=config.NUM_WORKERS,

@@ -1,31 +1,38 @@
 """TCGA data access, shared by every patch-encoder model.
 
-Patch encoders consume small RGB tiles. Where those tiles come from is resolved
-here in priority order so that a model script never has to care:
+Patch encoders consume small RGB tiles. Where those tiles come from is resolved here
+in priority order so a model script never has to care:
 
-    1. PFM_PATCH_DIR        -- a directory of pre-tiled patch images (preferred)
-    2. $PFM_TCGA_ROOT/thumbnails -- low-res slide overviews, used as a fallback
-                               so the pipeline can still run without tiling
+    1. PFM_PATCH_DIR holding per-slide `.tar` shards  (preferred -- see MEMORY MODEL)
+    2. PFM_PATCH_DIR holding loose patch image files   (fallback)
+    3. $PFM_TCGA_ROOT/thumbnails loose images          (last-resort fallback)
 
-If neither yields images, resolve_patch_root() returns (None, _) and the caller
-reports a clear "stage your data" message instead of crashing.
+If none yield images, resolve_patch_root() returns (None, ...) and the caller reports a
+clear "stage your data" message instead of crashing.
 
 MEMORY MODEL -- constant in the dataset size N
 -----------------------------------------------
-Data is NEVER materialised in RAM as a whole. The tiles stay as compressed JPEGs
-on the (node-local) disk; a streaming ``IterableDataset`` walks them one path at a
-time and hands each decoded tile to a bounded DataLoader prefetch queue. Host RAM
-therefore holds only the in-flight window
-    num_workers x prefetch_factor x batch_size x bytes_per_tile
-which is independent of N -- the SAME footprint whether there are 226k or 2.26M
-tiles. Nothing here scales with the dataset size: not the pixel buffers (bounded
-prefetch) and not the path index (streamed, never listed in full).
+Tiles are NEVER materialised in RAM as a whole. A streaming ``IterableDataset`` hands one
+decoded tile at a time to a bounded DataLoader prefetch queue, so host RAM holds only the
+in-flight window (num_workers x prefetch_factor x batch_size x bytes_per_tile) -- the same
+whether there are 226k or 22M tiles.
 
-Correctness with multiple workers: every tile is produced by EXACTLY ONE worker.
-Each worker walks the identical, deterministically-ordered path stream and keeps
-only the paths at its stride (``global_index % num_workers == worker_id``), so the
-union over workers is the full set with no duplicates and no omissions.
+WHY TAR SHARDS
+--------------
+Tiling persists ~16k tiny JPGs/slide (~2.26M files). Per-run staging/reading of that many
+files is a Lustre metadata storm (it timed the job out in STEP 4). ``tcga/pack_patches``
+packs each slide into one ``patches_tar/<slide_id>.tar``; here we stream tar MEMBERS. That
+turns millions of metadata ops into ~N_slides big sequential reads.
+
+Correctness with multiple workers:
+  * tar mode  -- each worker takes a disjoint set of tars (``tar_index % num_workers ==
+    worker_id``) and streams them whole, so every tile is produced by exactly one worker.
+  * loose mode -- a deterministic global walk, kept at stride, then survivors sharded by
+    worker. Either way: no duplicates, no omissions.
+
+PFM_PATCH_STRIDE keeps every Nth tile (1 = all; the mini run sets 10 for a 1/10 sample).
 """
+import io
 import os
 
 from . import config
@@ -33,16 +40,14 @@ from . import config
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 
 
+# ── loose-file streaming (fallback: thumbnails, or unpacked patches) ─────────────
 def _iter_image_paths(root, recursive=True):
-    """Yield image paths under ``root`` one at a time, in a DETERMINISTIC order,
-    using O(1) memory in the dataset size (only one directory's names are held at
-    a time). The fixed order is what lets independent workers shard the stream by
-    stride and still cover every tile exactly once.
-    """
+    """Yield image paths under ``root`` one at a time in a DETERMINISTIC order, using
+    O(1) memory in N (only one directory's names held at a time)."""
     if recursive:
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames.sort()                       # deterministic descent
-            for fn in sorted(filenames):          # bounded: one dir's files (~per-slide)
+            dirnames.sort()
+            for fn in sorted(filenames):
                 if fn.lower().endswith(IMG_EXTS):
                     yield os.path.join(dirpath, fn)
     else:
@@ -53,40 +58,73 @@ def _iter_image_paths(root, recursive=True):
                 yield os.path.join(root, fn)
 
 
+# ── tar-shard streaming (preferred) ──────────────────────────────────────────────
+def _iter_tars(tars_dir):
+    """Sorted per-slide `.tar` shard paths under ``tars_dir`` (deterministic order)."""
+    with os.scandir(tars_dir) as it:
+        names = sorted(e.name for e in it if e.is_file() and e.name.endswith(".tar"))
+    for n in names:
+        yield os.path.join(tars_dir, n)
+
+
+def _dir_has_tars(d):
+    with os.scandir(d) as it:
+        for e in it:
+            if e.is_file() and e.name.endswith(".tar"):
+                return True
+    return False
+
+
 def resolve_patch_root():
-    """Return ``(root, recursive)`` for the first source that holds >=1 image --
-    PFM_PATCH_DIR (recursive) then $PFM_TCGA_ROOT/thumbnails (flat) -- else
-    ``(None, False)``. Non-emptiness is checked by pulling just the first path
-    (O(1)); it never lists the directory."""
-    if config.PATCH_DIR and os.path.isdir(config.PATCH_DIR):
-        for _ in _iter_image_paths(config.PATCH_DIR, recursive=True):
-            return config.PATCH_DIR, True
+    """Return ``(mode, root, recursive)``:
+        ('tars',  dir, None)  -- PFM_PATCH_DIR holds per-slide .tar shards
+        ('loose', dir, bool)  -- PFM_PATCH_DIR / thumbnails hold loose images
+        (None, None, None)    -- nothing found
+    Non-emptiness is checked cheaply (first tar / first image), never a full listing."""
+    pd = config.PATCH_DIR
+    if pd and os.path.isdir(pd):
+        if _dir_has_tars(pd):
+            return "tars", pd, None
+        for _ in _iter_image_paths(pd, recursive=True):
+            return "loose", pd, True
     thumb = os.path.join(config.TCGA_ROOT, "thumbnails")
     if os.path.isdir(thumb):
         for _ in _iter_image_paths(thumb, recursive=False):
-            return thumb, False
-    return None, False
+            return "loose", thumb, False
+    return None, None, None
 
 
-def count_patch_images(root, recursive, limit=None):
-    """Stream-count the images under ``root`` (O(1) memory). Honours ``limit``
-    (or config.MAX_IMAGES; 0 = no cap) so the count matches what will be fed."""
-    limit = limit or (config.MAX_IMAGES or None)
-    n = 0
-    for _ in _iter_image_paths(root, recursive):
-        n += 1
-        if limit and n >= limit:
-            break
-    return n
+def count_patch_images(mode, root, recursive, stride=1):
+    """Total tiles that WILL be fed (after stride), O(1) memory. In tar mode uses the
+    `.done` sentinel counts pack_patches wrote (falls back to reading tar headers)."""
+    import tarfile
+    stride = max(1, stride)
+    total = 0
+    if mode == "tars":
+        for tarpath in _iter_tars(root):
+            n = None
+            done = tarpath[:-4] + ".done"
+            try:
+                n = int(open(done).read().strip())
+            except (OSError, ValueError):
+                with tarfile.open(tarpath) as tf:
+                    n = sum(1 for m in tf.getmembers() if m.isfile())
+            total += (n + stride - 1) // stride          # ceil(n/stride) kept per slide
+    elif mode == "loose":
+        i = 0
+        for _ in _iter_image_paths(root, recursive):
+            if i % stride == 0:
+                total += 1
+            i += 1
+    return total
 
 
 def find_patch_images(limit=None):
-    """Backward-compatible helper: return a *list* of image paths (materialises
-    it, so prefer the streaming dataset for the hot path). Honours ``limit`` or
-    config.MAX_IMAGES (0 = all). Returns [] if nothing is found."""
+    """Backward-compatible helper: a *list* of loose image paths (materialises it).
+    Returns [] in tar mode or when nothing is found. Prefer the streaming dataset."""
     limit = limit or (config.MAX_IMAGES or None)
-    root, recursive = resolve_patch_root()
-    if root is None:
+    mode, root, recursive = resolve_patch_root()
+    if mode != "loose":
         return []
     out = []
     for i, p in enumerate(_iter_image_paths(root, recursive)):
@@ -107,10 +145,7 @@ def describe_sources():
 
 def find_slide_feature_h5():
     """Locate an .h5 of precomputed patch features for slide encoders (TITAN).
-
-    Priority: PFM_SLIDE_FEATURES file -> first *.h5 under $PFM_TCGA_ROOT.
-    Returns a path or None.
-    """
+    Priority: PFM_SLIDE_FEATURES file -> first *.h5 under $PFM_TCGA_ROOT. Or None."""
     import glob
     if config.SLIDE_FEATURES and os.path.isfile(config.SLIDE_FEATURES):
         return config.SLIDE_FEATURES
@@ -123,40 +158,58 @@ def _open_rgb(path):
     return Image.open(path).convert("RGB")
 
 
-def make_streaming_dataset(transform, limit=None):
-    """Build a streaming ``IterableDataset`` yielding (transformed_tensor, path).
+def make_streaming_dataset(transform, stride=None):
+    """Streaming ``IterableDataset`` yielding (transformed_tensor, path). RAM is
+    independent of N (bounded prefetch, never preloaded). ``stride`` (or
+    config.PATCH_STRIDE) keeps every Nth tile. Worker sharding guarantees each tile is
+    produced by exactly one worker (no dup/drop). tar mode when shards exist, else loose."""
+    import tarfile
 
-    RAM is independent of the dataset size: tiles are decoded one at a time inside
-    the DataLoader's bounded prefetch window, never preloaded. With ``num_workers``
-    > 0 the path stream is sharded by stride so every tile is produced by exactly
-    one worker (no duplicates, no omissions). Honours ``limit``/config.MAX_IMAGES
-    (0 = all) as an EXACT global cap applied in the deterministic order.
-    """
-    import torch  # noqa: F401  (ensures torch present)
+    from PIL import Image
     from torch.utils.data import IterableDataset, get_worker_info
 
-    limit = limit or (config.MAX_IMAGES or None)
-    root, recursive = resolve_patch_root()
+    stride = max(1, int(stride if stride is not None else config.PATCH_STRIDE))
+    limit = config.MAX_IMAGES or None
+    mode, root, recursive = resolve_patch_root()
 
     class PatchIterableDataset(IterableDataset):
-        def __init__(self):
-            self.root = root
-            self.recursive = recursive
-            self.transform = transform
-            self.limit = limit
-
         def __iter__(self):
-            if self.root is None:
+            if root is None:
                 return
             info = get_worker_info()
             wid = info.id if info is not None else 0
             nw = info.num_workers if info is not None else 1
-            for i, path in enumerate(_iter_image_paths(self.root, self.recursive)):
-                if self.limit and i >= self.limit:   # exact global cap (all workers agree on i)
-                    break
-                if (i % nw) != wid:                  # this tile belongs to another worker
+            if mode == "tars":
+                yield from self._iter_tars(wid, nw)
+            else:
+                yield from self._iter_loose(wid, nw)
+
+        def _iter_tars(self, wid, nw):
+            for ti, tarpath in enumerate(_iter_tars(root)):
+                if (ti % nw) != wid:              # this slide's tar belongs to another worker
                     continue
-                yield self.transform(_open_rgb(path)), path
+                with tarfile.open(tarpath, "r") as tf:
+                    mi = 0
+                    for m in tf:                  # sequential -> streaming, O(1) memory
+                        if not m.isfile() or not m.name.lower().endswith(IMG_EXTS):
+                            continue
+                        if (mi % stride) == 0:
+                            f = tf.extractfile(m)
+                            if f is not None:
+                                img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                                yield transform(img), m.name
+                        mi += 1
+
+        def _iter_loose(self, wid, nw):
+            kept = 0
+            for i, path in enumerate(_iter_image_paths(root, recursive)):
+                if limit and i >= limit:
+                    break
+                if (i % stride) != 0:             # 1/stride global sample (deterministic)
+                    continue
+                if (kept % nw) == wid:            # shard survivors across workers
+                    yield transform(_open_rgb(path)), path
+                kept += 1
 
     return PatchIterableDataset()
 

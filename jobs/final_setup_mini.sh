@@ -98,11 +98,13 @@ DATASET="$TCGA/tables/dataset.csv"
 # for the coarse 1-thumbnail/slide path instead.
 CONFIG="${FINAL_CONFIG:-configs/tcga_tiled.yaml}"
 
-# MINI: extraction uses only 1 in MINI_FRACTION of the persisted patches (default 10 = 10%).
-# STEP 2 still tiles+persists the FULL set; only STEP 4's node-local sample is reduced. Clamp
-# a bad value (non-integer or 0) back to 10 so the run can never divide-by-zero / stage all.
+# MINI: extraction reads only 1 in MINI_FRACTION of the persisted patches (default 10 = 10%).
+# STEP 2 still tiles+packs the FULL set; the mini just STRIDES tar members at read time via
+# PFM_PATCH_STRIDE (so staging is identical to the full run -- same tar-shards -- only the GPU
+# work is reduced). Clamp a bad value (non-integer or 0) back to 10.
 MINI_FRACTION="${MINI_FRACTION:-10}"
 case "$MINI_FRACTION" in ''|*[!0-9]*|0) MINI_FRACTION=10;; esac
+export PFM_PATCH_STRIDE="$MINI_FRACTION"   # STEP 4 (shared with final_setup) honors this
 
 hr(){ echo "============================================================"; }
 fail(){ echo; echo "FINAL SETUP MINI ABORTED at: $*"; echo "=== end: $(date) ==="; exit 1; }
@@ -176,18 +178,17 @@ echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built
 ( cd "$REPO" && bash pfm_setup.sh setup ) \
   || echo "  WARN: one or more model venvs failed to set up (see log above); continuing."
 
-# ── STEP 4: stage a 1/MINI_FRACTION SAMPLE of the tiles -> node-local SSD ─────
-echo; echo "### STEP 4/5  stage a 1/$MINI_FRACTION sample of the tiles to node-local SSD ($STAGE)"
-PATCHES_SCRATCH="$TCGA/patches"   # persistent: tiled once by tile_slides, reused every run
-INPUT_MODE=""                     # set below: "patches" (intended) or a THUMBNAIL fallback
-# NB: count without `head` -- under `set -o pipefail`, `find | head` makes find die
-# with SIGPIPE and the whole test evaluates false even when patches exist.
-npatch=$(find "$PATCHES_SCRATCH" -mindepth 2 -name '*.jpg' 2>/dev/null | wc -l)
+# ── STEP 4: stage per-slide TAR SHARDS scratch -> node-local SSD ─────────────
+# Same staging as final_setup (identical tar-shards); the mini differs ONLY by
+# PFM_PATCH_STRIDE (exported above = MINI_FRACTION), which makes extraction read 1/N of each
+# slide's tar members. So staging is fast/complete and the GPU work is ~1/N.
+echo; echo "### STEP 4/5  stage patch tar-shards to node-local SSD ($STAGE)  [read stride 1/$MINI_FRACTION]"
+TARS_SCRATCH="$TCGA/patches_tar"
+PATCHES_SCRATCH="$TCGA/patches"
+INPUT_MODE=""
+export PFM_PATCH_STRIDE="${PFM_PATCH_STRIDE:-1}"
 
-# Loud, unmissable notice -- printed to BOTH the .out and the .err log -- whenever the
-# run degrades to any fallback path (thumbnails instead of tiles, or Lustre reads
-# instead of the node-local SSD). The user explicitly wants to be told about EVERY
-# fallback: a silent one wastes an expensive GPU job.
+# Loud, unmissable notice (stdout + .err) whenever the run degrades to any fallback path.
 fallback_banner() {                        # $1 headline, $2 detail, $3 impact
   echo
   echo "!!! ===================================================================== !!!"
@@ -196,70 +197,47 @@ fallback_banner() {                        # $1 headline, $2 detail, $3 impact
   echo "!!! Impact: $3"
   echo "!!! ===================================================================== !!!"
   echo
-  echo "FALLBACK: $1 -- $2" >&2            # also surface in the .err log
+  echo "FALLBACK: $1 -- $2" >&2
 }
 
-# The staging technique only helps if there IS a node-local SSD to stage onto. In a GPU
-# job $L_SCRATCH is the fast local NVMe; on a login node there is none and $STAGE falls
-# back to Lustre (staging is then a no-op copy -- flag it).
 SSD_OK=0
 if [ -n "${L_SCRATCH:-}" ] && [ -d "${L_SCRATCH:-}" ]; then SSD_OK=1; fi
 [ "$SSD_OK" -eq 1 ] || echo "  NOTE: no node-local SSD (\$L_SCRATCH) here; staging target $STAGE is on Lustre."
 
-if [ "${npatch:-0}" -ge 1 ]; then
-  # Stage only a 1/MINI_FRACTION SAMPLE of the tiles onto the node-local SSD, then the GPU
-  # reads them from fast local NVMe. That is ~1/MINI_FRACTION the GPU work of the full run
-  # while staying COMPUTE-bound (SSD reads), so it fits a short walltime.
-  PATCHES_LOCAL="$STAGE/tcga_patches_mini"
-  mkdir -p "$PATCHES_LOCAL"
-  FILELIST="$STAGE/mini_patchlist.txt"
-  # Deterministic 1/MINI_FRACTION sample across the SORTED patch list. Sorting groups a
-  # slide's patches together, so every-Nth spreads the sample across ALL slides -- benchmark
-  # still mean-pools each slide's kept patches into a slide-level vector for the probe.
-  ( cd "$PATCHES_SCRATCH" && find . -mindepth 2 -name '*.jpg' 2>/dev/null | sort \
-      | awk -v f="$MINI_FRACTION" 'f<=1 || NR % f == 0' ) > "$FILELIST"
-  nsel=$(wc -l < "$FILELIST" 2>/dev/null); nsel=${nsel:-0}
-  echo "  MINI: staging $nsel of $npatch tiles (1/$MINI_FRACTION): $PATCHES_SCRATCH -> $PATCHES_LOCAL (node-local SSD)"
-  ( cd "$PATCHES_SCRATCH" && tar -cf - -T "$FILELIST" ) 2>/dev/null | ( cd "$PATCHES_LOCAL" && tar -xf - ) 2>/dev/null || true
-  # Require a COMPLETE stage of the SAMPLE: an incomplete SSD copy would silently drop
-  # sampled patches. If it fails, fall back to the FULL set on scratch (the sampled subset
-  # lives only on the SSD, so it can't be cleanly re-read from Lustre) -- big + slow.
-  nstaged=$(find "$PATCHES_LOCAL" -mindepth 2 -name '*.jpg' 2>/dev/null | wc -l)
-  if [ "$SSD_OK" -eq 1 ] && [ "${nstaged:-0}" -ge "$nsel" ] && [ "${nstaged:-0}" -ge 1 ]; then
-    export PFM_PATCH_DIR="$PATCHES_LOCAL"
-    INPUT_MODE="patches ($nstaged of $npatch = 1/$MINI_FRACTION sample, node-local SSD)"
-    echo "  OK: $nstaged sampled tiles on SSD; GPU reads node-local -> compute-bound: $PFM_PATCH_DIR"
+ntars=$(find "$TARS_SCRATCH" -maxdepth 1 -name '*.tar' 2>/dev/null | wc -l)
+if [ "${ntars:-0}" -ge 1 ]; then
+  TARS_LOCAL="$STAGE/patches_tar"
+  mkdir -p "$TARS_LOCAL"
+  echo "  staging $ntars slide tar-shards: $TARS_SCRATCH (Lustre) -> $TARS_LOCAL (node-local SSD)"
+  cp -f "$TARS_SCRATCH"/*.tar  "$TARS_LOCAL"/ 2>/dev/null || true
+  cp -f "$TARS_SCRATCH"/*.done "$TARS_LOCAL"/ 2>/dev/null || true
+  nlocal=$(find "$TARS_LOCAL" -maxdepth 1 -name '*.tar' 2>/dev/null | wc -l)
+  if [ "$SSD_OK" -eq 1 ] && [ "${nlocal:-0}" -ge "$ntars" ]; then
+    export PFM_PATCH_DIR="$TARS_LOCAL"
+    INPUT_MODE="tar-shards ($nlocal slides, node-local SSD; read 1/$MINI_FRACTION)"
+    echo "  OK: all $nlocal tar-shards on SSD; GPU reads node-local -> compute-bound: $PFM_PATCH_DIR"
   else
-    export PFM_PATCH_DIR="$PATCHES_SCRATCH"
-    INPUT_MODE="patches (FULL $npatch tiles, SCRATCH/Lustre -- mini SSD staging $nstaged/$nsel) -- SLOW FALLBACK"
-    if [ "$SSD_OK" -ne 1 ]; then
-      fallback_banner "no node-local SSD; reading the FULL patch set off Lustre (mini sample not staged)" \
-        "No \$L_SCRATCH on this node, so the 1/$MINI_FRACTION sample could not be staged locally." \
-        "extraction runs on ALL $npatch tiles off Lustre -- slow AND I/O-bound; the mini speedup is lost."
-    else
-      fallback_banner "mini SSD staging incomplete; reading the FULL patch set off Lustre" \
-        "Only $nstaged/$nsel sampled tiles reached the SSD ($STAGE) -- likely full." \
-        "extraction runs on ALL $npatch tiles off Lustre -- slow AND I/O-bound; the mini speedup is lost."
-    fi
+    export PFM_PATCH_DIR="$TARS_SCRATCH"
+    INPUT_MODE="tar-shards ($ntars slides, SCRATCH/Lustre -- SSD staging $nlocal/$ntars) -- SLOW FALLBACK"
+    fallback_banner "reading tar-shards from Lustre scratch, not the node-local SSD" \
+      "$nlocal/$ntars shards reached the SSD ($STAGE)." \
+      "reading tar-shards off Lustre -- slower, but sequential (not the old metadata storm)."
   fi
-  # compute knobs (batch/workers/amp/prefetch) come from the config spec -> STEP 5.
+elif [ -d "$PATCHES_SCRATCH" ] && find "$PATCHES_SCRATCH" -mindepth 2 -name '*.jpg' 2>/dev/null | grep -q .; then
+  export PFM_PATCH_DIR="$PATCHES_SCRATCH"
+  INPUT_MODE="LOOSE patches (scratch, unpacked) -- SLOW FALLBACK"
+  fallback_banner "no packed tar-shards; reading LOOSE patches straight from Lustre" \
+    "pack_patches (STEP 2) produced no $TARS_SCRATCH/*.tar." \
+    "millions of tiny Lustre reads -- slow and timeout-prone (exactly what packing avoids)."
 else
-  THUMBS_LOCAL="$STAGE/thumbnails"
-  mkdir -p "$THUMBS_LOCAL"
-  # tiny files; copy the ones not already staged
-  cp -n "$TCGA"/thumbnails/*.jpg "$THUMBS_LOCAL"/ 2>/dev/null || true
-  n_local=$(find "$THUMBS_LOCAL" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)
-  if [ "$n_local" -ge 1 ]; then
-    export PFM_PATCH_DIR="$THUMBS_LOCAL"
-    INPUT_MODE="THUMBNAILS ($n_local staged, node-local) -- FALLBACK"
-  else
-    INPUT_MODE="THUMBNAILS (loader reads $TCGA/thumbnails) -- FALLBACK"
-  fi
-  fallback_banner "using THUMBNAILS, not persisted patch tiles" \
-    "No patch tiles found in $PATCHES_SCRATCH (tile_slides didn't finish, FINAL_CONFIG isn't the tiled config, or patches/ was purged -- see STEP 2)." \
-    "the COARSE 1-image-per-slide path, NOT the GPU-bound tiled run the tiled config intends."
+  export PFM_PATCH_DIR=""
+  INPUT_MODE="THUMBNAILS (loader reads $TCGA/thumbnails) -- FALLBACK"
+  fallback_banner "using THUMBNAILS, not patch tiles" \
+    "No tar-shards and no loose patches (tile_slides/pack_patches didn't run, or wrong FINAL_CONFIG)." \
+    "the COARSE 1-image-per-slide path, NOT the GPU-bound tiled run."
 fi
-echo "  input mode: $INPUT_MODE"
+# compute knobs (batch/workers/amp/prefetch) come from the config spec -> STEP 5.
+echo "  input mode: $INPUT_MODE  (stride 1/${PFM_PATCH_STRIDE})"
 
 # ── STEP 5: extract embeddings for every model, then benchmark (train) ───────
 # Spread models across the allocated GPUs (one model/GPU). GPU count is detected from

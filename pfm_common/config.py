@@ -45,6 +45,7 @@ SLIDE_FEATURES = _env("PFM_SLIDE_FEATURES", "")
 OUTPUT_DIR = _env("PFM_OUTPUT_DIR", os.path.join(PFM_ROOT, "embeddings"))
 
 MAX_IMAGES = _int_env("PFM_MAX_IMAGES", 0)         # 0 = no cap
+PATCH_STRIDE = _int_env("PFM_PATCH_STRIDE", 1)     # keep every Nth tile (1=all; mini sets 10 for a 1/10 sample)
 BATCH_SIZE = _int_env("PFM_BATCH_SIZE", 8)         # spec-driven in final_setup; this is the ad-hoc fallback
 NUM_WORKERS = _int_env("PFM_NUM_WORKERS", 2)       # ""
 AMP_DTYPE = _env("PFM_AMP_DTYPE", "auto")          # auto|float16|bfloat16|float32 (auto: bf16 if GPU supports, else fp16)

@@ -30,7 +30,8 @@ from tcga.slide_processor import SlideProcessor
 logger = logging.getLogger(__name__)
 
 VALID_STEPS = ["etl", "manifest", "download", "download_svs_cache", "stream_thumbnails",
-               "stage_process", "tile_slides", "process_slides", "gene_matrix", "assemble"]
+               "stage_process", "tile_slides", "pack_patches", "process_slides",
+               "gene_matrix", "assemble"]
 
 
 class TCGADatasetBuilder:
@@ -92,6 +93,7 @@ class TCGADatasetBuilder:
             "stream_thumbnails": self.run_stream_thumbnails,
             "stage_process": self.run_stage_process,
             "tile_slides": self.run_tile_slides,
+            "pack_patches": self.run_pack_patches,
             "process_slides": self.run_process_slides,
             "gene_matrix": self.run_gene_matrix,
             "assemble": self.run_assemble,
@@ -445,6 +447,18 @@ class TCGADatasetBuilder:
         full_df = full_df.copy()
         full_df["patches_dir"] = str(patches_dir)
         return full_df
+
+    # ── step 3e: pack per-slide patches into one .tar each (fast staging) ────
+    def run_pack_patches(self) -> None:
+        """Pack loose per-slide patch JPGs into one tar/slide (patches_tar/<slide_id>.tar)
+        so a run stages ~N_slides big files instead of millions of tiny Lustre files.
+        Idempotent/resumable; the loose patches are left in place as the source of truth."""
+        from tcga.pack_patches import pack_all
+        patches_dir = self.tcga_config.data_dir / "patches"
+        tars_dir = self.tcga_config.data_dir / "patches_tar"
+        counts = pack_all(patches_dir, tars_dir)
+        logger.info("Packed patches -> %s: %d slides packed, %d already, %d patches",
+                    tars_dir, counts["packed"], counts["skipped"], counts["patches"])
 
     # ── step 4: process slides ────────────────────────────────────────
 
