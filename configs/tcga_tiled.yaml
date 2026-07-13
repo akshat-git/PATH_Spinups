@@ -28,7 +28,10 @@ download:
   maf: true                 # MAF still downloaded (small); labels aligned to the tiled slides
   token_path: null
   n_processes: 8
-  target_gb: 50             # stratified full-SVS subset to tile (~10% of TCGA)
+  target_gb: null           # null = ALL slides in the 4 projects (the full ~500 GB of TCGA-
+                            # LUAD/LUSC/LGG/GBM, ~1400 slides) -- this is what final_setup.sh
+                            # (100%) tiles+extracts. Set a number (or FINAL_TARGET_GB=) to cap
+                            # by size; final_setup_mini.sh sets FINAL_TARGET_GB=50 for a subset.
   max_files: null           # set a slide COUNT instead of target_gb to cap by count
   stream_to_local: true     # stream each SVS into node-local, tile, evict; reuse cache if present
 

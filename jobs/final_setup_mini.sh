@@ -107,6 +107,11 @@ CONFIG="${FINAL_CONFIG:-configs/tcga_tiled.yaml}"
 MINI_FRACTION="${MINI_FRACTION:-100}"
 case "$MINI_FRACTION" in ''|*[!0-9]*|0) MINI_FRACTION=100;; esac
 export PFM_PATCH_STRIDE="$MINI_FRACTION"   # STEP 4 (shared with final_setup) honors this
+# The full config (tcga_tiled.yaml) now tiles ALL ~1400 slides (~500 GB). The mini must stay
+# a short job, so cap ITS tiling scope to a stratified ~50 GB subset (~142 slides) -- STEP 2
+# then only ensures those are tiled (they already are), never streaming the other ~1250.
+# (Extraction still reads 1/MINI_FRACTION of whatever tars are present.)
+export FINAL_TARGET_GB="${FINAL_TARGET_GB:-50}"
 
 hr(){ echo "============================================================"; }
 fail(){ echo; echo "FINAL SETUP MINI ABORTED at: $*"; echo "=== end: $(date) ==="; exit 1; }
