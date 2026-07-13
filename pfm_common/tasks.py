@@ -41,7 +41,10 @@ TASK_REGISTRY = {
     "kras": {"label_source": "KRAS", "require_maf": True, "class_names": ["KRAS-wt", "KRAS-mut"]},
     "tp53": {"label_source": "TP53", "require_maf": True, "class_names": ["TP53-wt", "TP53-mut"]},
     "egfr": {"label_source": "EGFR", "require_maf": True, "class_names": ["EGFR-wt", "EGFR-mut"]},
-    "idh":  {"label_source": "IDH",  "require_maf": True, "class_names": ["IDH-wt",  "IDH-mut"]},
+    # IDH status is IDH1 OR IDH2 mutated -- the MAF Hugo_Symbol is IDH1/IDH2, never a bare
+    # "IDH", so the old single-column "IDH" label filled 0 for everyone. label_any_of ORs
+    # the two gene columns (requires IDH1/IDH2 in the config's gene_matrix.genes).
+    "idh":  {"label_any_of": ["IDH1", "IDH2"], "require_maf": True, "class_names": ["IDH-wt", "IDH-mut"]},
 }
 
 ALL_TASKS = list(TASK_REGISTRY)
@@ -49,6 +52,14 @@ ALL_TASKS = list(TASK_REGISTRY)
 
 def _truthy(v):
     return str(v).strip().lower() in ("true", "1", "yes", "t")
+
+
+def _as01(v):
+    """Coerce a gene-matrix cell to 0/1 (mutated=1). Blank/unparseable -> 0."""
+    try:
+        return 1 if int(float(v)) != 0 else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def labels_for_task(dataset_csv, task):
@@ -76,6 +87,13 @@ def labels_for_task(dataset_csv, task):
             if cfg.get("require_maf") and not _truthy(r.get("has_maf", "")):
                 continue
             if "filter_values" in cfg and r.get(cfg["filter_col"]) not in cfg["filter_values"]:
+                continue
+            if "label_any_of" in cfg:
+                cols = cfg["label_any_of"]
+                vals = [r.get(c) for c in cols]
+                if all(v in (None, "") for v in vals):
+                    continue  # no gene-matrix data for these columns (unsequenced)
+                labels[r["slide_id"]] = 1 if any(_as01(v) for v in vals) else 0
                 continue
             raw = r.get(cfg["label_source"], "")
             if raw is None or raw == "":

@@ -44,7 +44,7 @@ slides:
 
 gene_matrix:
   enabled: true
-  genes: ["KRAS","TP53","EGFR","IDH"]
+  genes: ["KRAS","TP53","EGFR","IDH1","IDH2"]   # IDH1/IDH2 (not bare "IDH"): the `idh` task ORs them
 
 # stage_process = cache full SVS on scratch + node-local staged thumbnailing.
 steps:
