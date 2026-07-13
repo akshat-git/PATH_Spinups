@@ -502,6 +502,54 @@ cmd_run() {
   # Completion is detected via a per-GPU rc-file: `kill -0` can't tell a finished child
   # from a zombie, so the wrapper writes run_one's exit code on exit and we poll for it.
   local ngpu="${PFM_RUN_GPUS:-1}"
+
+  # PFM_RUN_MODE=shard: DATA-PARALLEL. Run models one at a time, but split each model's
+  # slide-tars across ALL $ngpu GPUs (one process per GPU, disjoint slides), then merge the
+  # per-shard slide embeddings. Every GPU works on every model, so makespan ~= total/ngpu
+  # instead of being gated by the single slowest model -- this is what lets 8 GPUs actually
+  # help (the work-queue below tops out at the slowest model's single-GPU time).
+  if [[ "$ngpu" -gt 1 && "${PFM_RUN_MODE:-queue}" == "shard" ]]; then
+    log "run: DATA-PARALLEL -- each of ${#targets[@]} models sharded across $ngpu GPUs"
+    local ok=() bad=() g r mrc
+    for m in "${targets[@]}"; do
+      log "[$m] sharding across $ngpu GPUs (PFM_SHARD_COUNT=$ngpu)"
+      local rcdir; rcdir="$(mktemp -d "${TMP_DIR:-/tmp}/pfm_shard.XXXXXX")"
+      for ((g=0; g<ngpu; g++)); do
+        ( CUDA_VISIBLE_DEVICES="$g" PFM_SHARD_INDEX="$g" PFM_SHARD_COUNT="$ngpu" \
+            run_one "$m"; echo $? > "$rcdir/g$g.rc" ) &
+      done
+      wait                                   # all shards of THIS model
+      mrc=0
+      for ((g=0; g<ngpu; g++)); do
+        r="$(cat "$rcdir/g$g.rc" 2>/dev/null || echo 1)"
+        [[ "$r" -ne 0 ]] && { [[ "$r" -eq 75 || $mrc -ne 75 ]] && mrc=$r; }
+      done
+      rm -rf "$rcdir"
+      if [[ $mrc -eq 0 ]]; then
+        log "[$m] all $ngpu shards done -> merging slide embeddings"
+        if arun "$PROJECT_DIR" "$(venv_python "$m")" -m pfm_common.merge_shards "$m" "$ngpu"; then
+          ok+=("$m")
+        else
+          warn "[$m] merge failed"; bad+=("$m"); [[ $rc_worst -eq 0 ]] && rc_worst=1
+        fi
+      else
+        warn "[$m] shard(s) exited rc=$mrc -- not merging (model dropped)"
+        bad+=("$m"); [[ $rc_worst -ne 75 ]] && rc_worst=$mrc
+      fi
+    done
+    log "run(data-parallel) summary:  OK=[${ok[*]:-}]  FAILED=[${bad[*]:-}]  (worst rc=$rc_worst)"
+    return $rc_worst
+  fi
+
+  # PFM_RUN_GPUS>1 (default mode): run one model per GPU via a WORK QUEUE. A GPU takes the
+  # next pending model the INSTANT it frees, instead of waiting for a whole "wave" to finish.
+  # The old wave scheme blocked on the slowest model in each wave while the other GPUs sat
+  # idle (e.g. virchow stalling 3 GPUs); the queue keeps every GPU busy, so makespan drops
+  # to ~max(total_work/N, slowest_single_model). (For many GPUs / few models, PFM_RUN_MODE=
+  # shard above is better -- it isn't gated by the slowest single model.)
+  # Each model is pinned with CUDA_VISIBLE_DEVICES (0..N-1, relative to the SLURM alloc).
+  # Completion is detected via a per-GPU rc-file: `kill -0` can't tell a finished child
+  # from a zombie, so the wrapper writes run_one's exit code on exit and we poll for it.
   if [[ "$ngpu" -gt 1 ]]; then
     log "run: ${#targets[@]} models across $ngpu GPUs (work queue -- a GPU takes the next model the instant it frees)"
     local qn=${#targets[@]} qi=0 remaining=${#targets[@]}

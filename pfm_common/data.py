@@ -170,6 +170,10 @@ def make_streaming_dataset(transform, stride=None):
 
     stride = max(1, int(stride if stride is not None else config.PATCH_STRIDE))
     limit = config.MAX_IMAGES or None
+    # Data-parallel sharding across GPU PROCESSES (config, set per-GPU by the runner), on top
+    # of DataLoader-WORKER sharding inside each process. shard_count==1 => no process sharding.
+    shard_index = config.SHARD_INDEX
+    shard_count = max(1, config.SHARD_COUNT)
     mode, root, recursive = resolve_patch_root()
 
     class PatchIterableDataset(IterableDataset):
@@ -185,29 +189,39 @@ def make_streaming_dataset(transform, stride=None):
                 yield from self._iter_loose(wid, nw)
 
         def _iter_tars(self, wid, nw):
+            # Two levels: this GPU process takes tars where ti % shard_count == shard_index
+            # (a DISJOINT set of whole slides); among THOSE, worker wid takes every nw-th.
+            # Union over all (process, worker) pairs = every tar exactly once.
+            j = 0
             for ti, tarpath in enumerate(_iter_tars(root)):
-                if (ti % nw) != wid:              # this slide's tar belongs to another worker
+                if (ti % shard_count) != shard_index:
                     continue
-                with tarfile.open(tarpath, "r") as tf:
-                    mi = 0
-                    for m in tf:                  # sequential -> streaming, O(1) memory
-                        if not m.isfile() or not m.name.lower().endswith(IMG_EXTS):
-                            continue
-                        if (mi % stride) == 0:
-                            f = tf.extractfile(m)
-                            if f is not None:
-                                img = Image.open(io.BytesIO(f.read())).convert("RGB")
-                                yield transform(img), m.name
-                        mi += 1
+                if (j % nw) == wid:
+                    with tarfile.open(tarpath, "r") as tf:
+                        mi = 0
+                        for m in tf:              # sequential -> streaming, O(1) memory
+                            if not m.isfile() or not m.name.lower().endswith(IMG_EXTS):
+                                continue
+                            if (mi % stride) == 0:
+                                f = tf.extractfile(m)
+                                if f is not None:
+                                    img = Image.open(io.BytesIO(f.read())).convert("RGB")
+                                    yield transform(img), m.name
+                            mi += 1
+                j += 1
 
         def _iter_loose(self, wid, nw):
+            # Fallback (thumbnails / unpacked). Assign each stride-survivor to exactly one
+            # (process, worker) consumer: total = shard_count*nw, my id = shard_index*nw+wid.
+            total = shard_count * nw
+            me = shard_index * nw + wid
             kept = 0
             for i, path in enumerate(_iter_image_paths(root, recursive)):
                 if limit and i >= limit:
                     break
                 if (i % stride) != 0:             # 1/stride global sample (deterministic)
                     continue
-                if (kept % nw) == wid:            # shard survivors across workers
+                if (kept % total) == me:
                     yield transform(_open_rgb(path)), path
                 kept += 1
 

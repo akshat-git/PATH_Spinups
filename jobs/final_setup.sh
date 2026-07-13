@@ -1,18 +1,18 @@
 #!/bin/bash
 #SBATCH --job-name=tcga_final
 #SBATCH --partition=gpu
-#SBATCH -G 4
-#SBATCH -C GPU_MEM:80GB      # main run: target H100 (80GB, Hopper) -- ~5x a V100 and native
-                             # bf16. Sherlock has H100 nodes on gpu (verify with node_feat);
-                             # remove this line to run on any available GPU instead.
-#SBATCH --nodes=1            # FIX: force all 4 GPUs onto ONE node. Without this, -G 4 let
-                             # Slurm split the alloc across 2 nodes (2 GPUs each) and the
-                             # single-node script only used the head node's 2 GPUs.
-#SBATCH --cpus-per-task=20   # 5 dataloader workers/GPU (auto = cpus/GPUs = 20/4); fits the
-                             # 20-core gpu nodes too, so it schedules on more of the pool.
-#SBATCH --mem=48G            # RAM = bounded DataLoader prefetch window (workers x prefetch x
-                             # batch), INDEPENDENT of dataset size -- identical for mini & full.
-                             # Covers all 4 model procs' windows on this node (streaming, no preload).
+#SBATCH -G 8                 # 8 GPUs, data-parallel (PFM_RUN_MODE=shard): each model is split
+                             # across all 8, so 8 GPUs actually speed it up (the work-queue is
+                             # gated by the slowest single model; sharding is not).
+#SBATCH -C GPU_MEM:80GB      # target the fastest available 8-GPU node. NOTE: Sherlock has NO
+                             # B200; the newest is H100 (80GB, Hopper) -- on gpu that's the
+                             # single 8-GPU node sh04-01n01. The code is GPU-count-agnostic, so
+                             # it'll shard across 8 of WHATEVER it lands on (incl. B200 if ever
+                             # added; bump this to the B200's GPU_MEM then). Drop -C for any GPU.
+#SBATCH --nodes=1            # all 8 GPUs on ONE node (a process can't drive a GPU on another node)
+#SBATCH --cpus-per-task=32   # ~4 dataloader workers/GPU across 8 GPUs (32/8); raise if the node has more
+#SBATCH --mem=128G           # RAM = bounded prefetch window x 8 model procs (streaming, no preload);
+                             # independent of dataset size. ~12G/proc x 8 shards + headroom.
 #SBATCH --time=2-00:00:00    # full run = ALL ~2.26M patches x ~9 models; ~10-16h even with
                              # the work-queue scheduler, so use the gpu partition's 2-day max.
 #SBATCH --output=logs/%x_%j.out
@@ -244,6 +244,10 @@ echo "  input mode: $INPUT_MODE  (stride 1/${PFM_PATCH_STRIDE})"
 # spec's `compute:` block -- nothing hardcoded here.
 NGPU=$(nvidia-smi -L 2>/dev/null | wc -l); NGPU=${NGPU:-1}; [ "$NGPU" -lt 1 ] && NGPU=1
 export PFM_RUN_GPUS="$NGPU"
+# DATA-PARALLEL: shard every model across all $NGPU GPUs (makespan ~ total/NGPU, not gated by
+# the slowest single model) -- this is what makes 8 GPUs pay off. Override PFM_RUN_MODE=queue
+# for the one-model-per-GPU work queue instead.
+export PFM_RUN_MODE="${PFM_RUN_MODE:-shard}"
 CPT="${SLURM_CPUS_PER_TASK:-1}"
 
 # Read the compute spec from the config (via the tcga_build venv's omegaconf).

@@ -191,20 +191,26 @@ Job knobs: `SMOKE_MAX_FILES`/`SMOKE_MODEL`/`SMOKE_MIN_SAMPLES`; `PROOF_MAX_FILES
 
 ## Entrypoints (both GPU, both fully self-bootstrapping / failsafe)
 
-Both build every missing piece themselves — data container/venv (STEP 1), the dataset
-with patches tiled+persisted to `$PFM_TCGA_ROOT/patches` (STEP 2), model container **AND**
-per-model venvs (STEP 3, `pfm_setup.sh setup`, idempotent — skips venvs already built) —
-then stage patches node-local (STEP 4) → `pfm_setup.sh run` (all models) → `benchmark`
-(STEP 5). An external party can run either on a fresh checkout (after adding
-`runtime/.hf_token`) and it works end-to-end.
+Both build every missing piece themselves — data container/venv (STEP 1); the dataset,
+tiling each SVS **directly into one `patches_tar/<slide_id>.tar`** (STEP 2, `tile_slides`;
+`pack_patches` migrates any legacy loose patches) — so staging reads ~N_slides big files,
+not millions of tiny ones; model container **AND** per-model venvs (STEP 3,
+`pfm_setup.sh setup`, idempotent) — then stage the tar-shards node-local (STEP 4) →
+`pfm_setup.sh run` → `benchmark` (STEP 5). Extraction **mean-pools to slide level as it
+runs** (`runner`), saving ~N_slides vectors (not N_patches). An external party can run
+either on a fresh checkout (after adding `runtime/.hf_token`) end-to-end.
 
-- **Final — `jobs/final_setup.sh` (GPU).** Extraction runs on **ALL** persisted patches
-  (default config `tcga_tiled.yaml`). Submit: `mkdir -p logs && sbatch jobs/final_setup.sh`.
-- **Mini — `jobs/final_setup_mini.sh` (GPU).** Identical, except STEP 4 stages only a
-  **1/`MINI_FRACTION`** (default 10%) sample of the tiles to the SSD → ~10× less GPU work,
-  fits a short walltime. STEP 2 still tiles+persists the FULL set, so `final_setup.sh` can
-  use all of them later — nothing is discarded. Submit:
-  `mkdir -p logs && sbatch jobs/final_setup_mini.sh`. Knob: `MINI_FRACTION`.
+- **Mini — `jobs/final_setup_mini.sh`.** `-G 4` **general** GPUs (no `-C`), 48 G, 30 min.
+  Reads a **1% sample** (`MINI_FRACTION=100` → `PFM_PATCH_STRIDE=100`, every 100th tar
+  member) of the SAME tars/slides as full → faithful emulation at ~1% the GPU work. Default
+  run mode = work-queue. Submit: `mkdir -p logs && sbatch jobs/final_setup_mini.sh`.
+- **Final — `jobs/final_setup.sh`.** `-G 8 -C GPU_MEM:80GB` (H100 — Sherlock has **no
+  B200**; the code is GPU-count-agnostic so it shards across 8 of whatever it lands on),
+  `--nodes=1`, 128 G, 2-day. **`PFM_RUN_MODE=shard`**: each model is split across all 8 GPUs
+  (`PFM_SHARD_COUNT`/`PFM_SHARD_INDEX` → each GPU takes a disjoint set of slide-tars, writes
+  a per-shard file, then `pfm_common.merge_shards` concatenates). Makespan ≈ total_work/8,
+  not gated by the slowest single model. Runs on ALL patches. Submit:
+  `mkdir -p logs && sbatch jobs/final_setup.sh`.
 
 Repo-dir resolution in the job scripts picks the first candidate that actually
 contains the pipeline files (`build_tcga_dataset.py` + `jobs/verify_tcga_env.py`):

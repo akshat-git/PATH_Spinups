@@ -154,11 +154,20 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
     slide_ids = list(sums.keys())
     embeddings = torch.stack([sums[s] / counts[s] for s in slide_ids], 0)   # [N_slides, D]
     out_dir = config.output_dir_for(name)
-    out_path = os.path.join(out_dir, "patch_embeddings.pt")
+    # Data-parallel: each GPU process wrote a DISJOINT set of slides, so save a per-shard
+    # file; pfm_common.merge_shards concatenates them into patch_embeddings.pt. Single-shard
+    # (SHARD_COUNT==1) writes the final file directly.
+    if config.SHARD_COUNT > 1:
+        out_path = os.path.join(out_dir, f"patch_embeddings.shard{config.SHARD_INDEX}of{config.SHARD_COUNT}.pt")
+        tag = f" [shard {config.SHARD_INDEX}/{config.SHARD_COUNT}]"
+    else:
+        out_path = os.path.join(out_dir, "patch_embeddings.pt")
+        tag = ""
     torch.save({"model": name, "embeddings": embeddings, "slide_ids": slide_ids,
-                "patch_counts": [counts[s] for s in slide_ids], "n_patches": n_seen}, out_path)
+                "patch_counts": [counts[s] for s in slide_ids], "n_patches": n_seen,
+                "shard_index": config.SHARD_INDEX, "shard_count": config.SHARD_COUNT}, out_path)
     print(
-        f"[{name}] saved slide-level embeddings {tuple(embeddings.shape)} "
+        f"[{name}]{tag} saved slide-level embeddings {tuple(embeddings.shape)} "
         f"({len(slide_ids)} slides, mean-pooled from {n_seen} patches) -> {out_path} "
         f"({time.time()-t0:.1f}s)",
         flush=True,
