@@ -39,11 +39,13 @@ models.txt                # the 11 model names
 pfm_common/               # SHARED infra imported by every model (written once, reused)
   config.py               #   env-driven paths/knobs; PFM_ROOT defaults to <repo>/runtime; device()=cuda|cpu
   hf_auth.py              #   HuggingFace login from $HF_TOKEN
-  data.py                 #   locate TCGA patch/thumbnail images; torch Dataset + collate
-  runner.py               #   run_patch_encoder(): batched extract loop -> patch_embeddings.pt;
-                          #     catches gated/unauthorized HF errors -> prints ACCESS NOT GRANTED, exits 75
+  data.py                 #   streaming IterableDataset over per-slide .tar shards (or loose/
+                          #     thumbnails fallback); PFM_PATCH_STRIDE + process/worker sharding
+  runner.py               #   run_patch_encoder(): stream -> encode -> MEAN-POOL to slide level
+                          #     as it runs -> patch_embeddings[.shard<g>of<N>].pt; rc 75 = NO-ACCESS
+  merge_shards.py         #   concat per-shard slide embeddings -> patch_embeddings.pt (data-parallel)
   train_probe.py          #   fit_linear_probe() + CLI: linear head over frozen embeddings
-  tasks.py                #   TASK_REGISTRY: 6 TCGA tasks (row filter + label column)
+  tasks.py                #   TASK_REGISTRY: 6 TCGA tasks; idh = IDH1|IDH2 (label_any_of)
   metrics.py              #   numpy-only acc / balanced acc / macro-F1 / AUROC / confusion
   benchmark.py            #   every (model x task): probe + score -> results.{csv,json}
   plot_results.py         #   leaderboard + model x task heatmap PNG + summary CSV
@@ -135,16 +137,19 @@ without extension, matching `thumbnails/<slide_id>.jpg`.
    gene matrix, assembles `tables/dataset.csv`. Runs in `tcga_build.sif`; output dir
    `PFM_TCGA_ROOT` (default `runtime/tcga`), bind-mounted `/tcga_data`. Two data
    strategies (see below) share the same thumbnail/`dataset.csv` output.
-2. **Extract** — `runner.run_patch_encoder(name, load, embed, gated)` loads images
-   (`data.find_patch_images`: PFM_PATCH_DIR recursive -> thumbnails fallback), batches
-   through the frozen encoder in `pfm_base.sif` (GPU, **autocast fp16**), saves
-   `{"model","embeddings":Tensor[N,D],"paths":[...]}` to
-   `PFM_OUTPUT_DIR/<model>/patch_embeddings.pt`. N = #images (patches with tiling, else #slides).
-3. **Benchmark** — `benchmark.py` discovers models with embeddings; per (model,task)
-   **mean-pools patches -> one vector per slide** (`_slide_id` splits the `<sid>__x_y`
-   patch suffix; thumbnails have no `__` so it's a no-op), joins labels by slide_id,
-   stratified split, `fit_linear_probe` (z-scored, AdamW, CE), scores via
-   `metrics.compute_all` -> `benchmark/results.{csv,json}`.
+2. **Extract** — `runner.run_patch_encoder(name, load, embed, gated)` streams tiles via
+   `data.make_streaming_dataset` (an `IterableDataset` reading tar members from `PFM_PATCH_DIR`;
+   O(1) RAM, sharded by GPU-process × DataLoader-worker; `PFM_PATCH_STRIDE` keeps every Nth),
+   runs the frozen encoder in `pfm_base.sif` (GPU, **autocast bf16/fp16 auto**), and
+   **mean-pools to slide level AS IT RUNS** (running sum+count per slide) — saving
+   `{"embeddings":Tensor[N_slides,D],"slide_ids":[...]}` (not N_patches) to
+   `PFM_OUTPUT_DIR/<model>/patch_embeddings.pt`. Data-parallel (`PFM_SHARD_COUNT>1`) writes
+   `patch_embeddings.shard<g>of<N>.pt` per GPU (disjoint slides); `pfm_common.merge_shards`
+   concatenates them into `patch_embeddings.pt`.
+3. **Benchmark** — `benchmark.py` discovers models with embeddings; loads the slide-level
+   vectors (`slide_ids`; falls back to mean-pooling `paths` for legacy per-patch files),
+   joins labels by slide_id (`tasks.labels_for_task`), stratified split, `fit_linear_probe`
+   (z-scored, AdamW, CE), scores via `metrics.compute_all` -> `benchmark/results.{csv,json}`.
 4. **Plot** — `plot_results.py` -> leaderboard, `summary_<metric>.csv`,
    `heatmap_<metric>.png` (default AUROC).
 
@@ -177,16 +182,21 @@ the small artifact is kept.
 ## Config / env knobs
 
 `pfm_common/config.py` (env): `PFM_ROOT` (default `<repo>/runtime`), `PFM_TCGA_ROOT`,
-`PFM_PATCH_DIR`, `PFM_OUTPUT_DIR`, `PFM_SLIDE_FEATURES`, `PFM_MAX_IMAGES` (0=all),
-`PFM_BATCH_SIZE`, `PFM_NUM_WORKERS`, `HF_TOKEN`.
+`PFM_PATCH_DIR` (dir of `.tar` shards OR loose images), `PFM_OUTPUT_DIR`, `PFM_SLIDE_FEATURES`,
+`PFM_MAX_IMAGES` (0=all), `PFM_BATCH_SIZE`, `PFM_NUM_WORKERS`, `PFM_PREFETCH_FACTOR`,
+`PFM_AMP_DTYPE`, `HF_TOKEN`. **Scaling knobs:** `PFM_PATCH_STRIDE` (keep every Nth tar member;
+1=all, mini=100 for 1%), `PFM_SHARD_INDEX`/`PFM_SHARD_COUNT` (data-parallel: this process
+takes tars where `tar_index % COUNT == INDEX`; COUNT=1 = off).
 
-ETL config (YAML): `download.slides`, `download.maf`, `download.max_files` (subset by
-count), `download.target_gb` (subset by size, staged path), `slides.thumbnail_size`,
-`slides.n_workers`, `slides.stage_download_workers`, `slides.stream_fallback`,
-`gene_matrix.genes`, `steps`.
+ETL config (YAML): `download.slides`, `download.maf`, `download.max_files` (cap by count),
+`download.target_gb` (**cap by size; `null` = ALL slides = the full ~500 GB — final_setup's
+default**), `patches.{patch_size,level,tissue_thresh,...}`, `slides.stage_download_workers`,
+`gene_matrix.genes` (incl. `IDH1`/`IDH2` for the `idh` task), `steps`
+(`etl,manifest,tile_slides,pack_patches,download,gene_matrix,assemble`).
 
-Job knobs: `SMOKE_MAX_FILES`/`SMOKE_MODEL`/`SMOKE_MIN_SAMPLES`; `PROOF_MAX_FILES`/
-`PROOF_MODELS`/`PROOF_MIN_SAMPLES`; `FINAL_TARGET_GB`; `MED_PROJECT_DIR`/`PFM_REPO`/
+Job knobs: `FINAL_TARGET_GB` (override `download.target_gb`; mini sets 50), `MINI_FRACTION`
+(mini's 1/N sample → `PFM_PATCH_STRIDE`), `PFM_RUN_MODE` (`shard` = data-parallel per model,
+`queue` = one-model-per-GPU work queue), `FINAL_CONFIG`, `MED_PROJECT_DIR`/`PFM_REPO`/
 `PFM_PROJECT_DIR` (dir overrides).
 
 ## Entrypoints (both GPU, both fully self-bootstrapping / failsafe)
@@ -200,16 +210,20 @@ not millions of tiny ones; model container **AND** per-model venvs (STEP 3,
 runs** (`runner`), saving ~N_slides vectors (not N_patches). An external party can run
 either on a fresh checkout (after adding `runtime/.hf_token`) end-to-end.
 
-- **Mini — `jobs/final_setup_mini.sh`.** `-G 4` **general** GPUs (no `-C`), 48 G, 30 min.
-  Reads a **1% sample** (`MINI_FRACTION=100` → `PFM_PATCH_STRIDE=100`, every 100th tar
-  member) of the SAME tars/slides as full → faithful emulation at ~1% the GPU work. Default
-  run mode = work-queue. Submit: `mkdir -p logs && sbatch jobs/final_setup_mini.sh`.
-- **Final — `jobs/final_setup.sh`.** `-G 8 -C GPU_MEM:80GB` (H100 — Sherlock has **no
-  B200**; the code is GPU-count-agnostic so it shards across 8 of whatever it lands on),
-  `--nodes=1`, 128 G, 2-day. **`PFM_RUN_MODE=shard`**: each model is split across all 8 GPUs
-  (`PFM_SHARD_COUNT`/`PFM_SHARD_INDEX` → each GPU takes a disjoint set of slide-tars, writes
-  a per-shard file, then `pfm_common.merge_shards` concatenates). Makespan ≈ total_work/8,
-  not gated by the slowest single model. Runs on ALL patches. Submit:
+- **Mini — `jobs/final_setup_mini.sh`.** `-G 4` **general** GPUs (no `-C`), 48 G, **30 min**.
+  `FINAL_TARGET_GB=50` caps its tiling scope to a stratified ~50 GB / ~142-slide subset (so a
+  short job never streams the other ~1250 slides); extraction reads a **1% sample**
+  (`MINI_FRACTION=100` → `PFM_PATCH_STRIDE=100`, every 100th tar member). Data-parallel
+  (`PFM_RUN_MODE=shard`), same scheduler as full. ~12–15 min once it gets a node. Submit:
+  `mkdir -p logs && sbatch jobs/final_setup_mini.sh`.
+- **Final — `jobs/final_setup.sh`.** Runs on **100% of ALL ~1400 slides (~500 GB, the full
+  TCGA-LUAD/LUSC/LGG/GBM)** — `configs/tcga_tiled.yaml` has `download.target_gb: null` (no
+  cap). `-G 8 -C GPU_MEM:80GB` (H100 — Sherlock has **no B200**; code is GPU-count-agnostic,
+  shards across 8 of whatever it lands on), `--nodes=1`, 128 G, **1-06:00:00 (~30 h)**.
+  **`PFM_RUN_MODE=shard`**: each model split across all 8 GPUs (`PFM_SHARD_COUNT`/
+  `PFM_SHARD_INDEX` → each GPU takes a disjoint set of slide-tars, writes a per-shard file,
+  then `pfm_common.merge_shards` concatenates). Makespan ≈ total_work/8, not gated by the
+  slowest single model. One-time tiling ~5–10 h (resumable) + extract ~9–12 h. Submit:
   `mkdir -p logs && sbatch jobs/final_setup.sh`.
 
 Repo-dir resolution in the job scripts picks the first candidate that actually
@@ -256,16 +270,18 @@ work whether submitted from the repo root or `jobs/`.
 
 ## Known caveats / TODO
 
-1. **IDH task degenerate.** Config gene is `IDH`, but MAF `Hugo_Symbol` is
-   `IDH1`/`IDH2` — no bare `IDH`, so `idh` fills 0 and is skipped ("one class"). FIX:
-   use `IDH1`/`IDH2` in the config genes and add matching entries in `tasks.py`.
-2. **h-optimus** needs an HF access grant to `bioptimus/H-optimus-0` (else disregarded).
-3. Author TODOs in `downloader.py`/`manifest.py` are tech debt, not blockers.
-4. **Patches on Lustre.** Tiling persists ~16k JPGs/slide (~2.26M files at full scale) under
-   `PFM_TCGA_ROOT/patches/`; extraction reads them from `$SCRATCH` directly. Fine at this scale
-   (≪ 20M-inode limit) but if reads become the bottleneck, stage to node-local or pack per-slide
-   `.h5`. **Full-scale tiled extraction (~142k patches × 9 models) will not fit one 3 h GPU job** —
-   reduce `max_patches`, split models across jobs, or raise walltime.
+1. **idh task — FIXED** (`tasks.py` `idh` = `IDH1|IDH2` via `label_any_of`; configs tile
+   `IDH1`/`IDH2`). Populates once the gene matrix is rebuilt with those genes.
+2. **kras (and gene tasks generally) thin at small MAF coverage.** Only slides with a MAF
+   have gene labels — in the 50 GB subset that's ~61 samples (KRAS-mut ~4 → near-degenerate).
+   Fix is more sequenced slides: the **full 500 GB run** (~1400 slides) has far more MAF
+   coverage, so gene tasks come alive there. Not a code bug.
+3. **h-optimus** needs an HF access grant to `bioptimus/H-optimus-0` (else disregarded).
+4. **No B200 on Sherlock.** Fastest is H100 (`GPU_MEM:80GB`) / H200 (owners). 8-GPU nodes on
+   `gpu` = the single H100 node `sh04-01n01` (long queue); 8-GPU A100/H100/H200 live on `owners`.
+5. **Scale is handled** (was the old caveat): tiler writes per-slide **tars** (no 22.6M-file
+   Lustre storm), extraction **pools to slide level** (embeddings ~MB not 100s GB), and
+   **data-parallel shard** spreads a model across GPUs. Full 500 GB run fits the ~30 h walltime.
 
 ## Gotchas
 

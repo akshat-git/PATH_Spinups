@@ -13,8 +13,10 @@
 #SBATCH --cpus-per-task=32   # ~4 dataloader workers/GPU across 8 GPUs (32/8); raise if the node has more
 #SBATCH --mem=128G           # RAM = bounded prefetch window x 8 model procs (streaming, no preload);
                              # independent of dataset size. ~12G/proc x 8 shards + headroom.
-#SBATCH --time=2-00:00:00    # full run = ALL ~2.26M patches x ~9 models; ~10-16h even with
-                             # the work-queue scheduler, so use the gpu partition's 2-day max.
+#SBATCH --time=1-06:00:00    # ALL ~1400 slides / ~22.6M patches: one-time tile ~5-10h + extract
+                             # ~9-12h (8xH100, sharded) => ~15-22h. 30h = just above, with margin
+                             # for WAN/tiling variance. Tiling is resumable (tars persist) if it
+                             # overruns; bump toward the 2-day max if your WAN is slow.
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 

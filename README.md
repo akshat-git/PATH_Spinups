@@ -121,10 +121,12 @@ workflow) instead of one thumbnail, so extraction is GPU-bound, not I/O-bound:
 ```
    acquire the SVS (fallback chain above) → node-local $TMPDIR/<name>.svs
         │  Otsu tissue mask on a downsampled thumbnail (adaptive per slide) →
-        │  keep EVERY grid cell with ≥ tissue_thresh tissue (uncapped: ~16k/slide, ~2.26M total)
+        │  keep EVERY grid cell with ≥ tissue_thresh tissue (uncapped: ~16k/slide;
+        │  ~22.6M total for the full ~1400 slides, ~2.26M for the 50 GB mini subset)
+        │  write each patch DIRECTLY into one tar per slide (no millions of loose files)
         ▼
-   PERSISTENT  runtime/<root>/patches/<slide_id>/<slide_id>__x<X>_y<Y>.jpg   ← tiled ONCE
-        │        (reused every run; tiling is a one-time cost — this IS the fallback top branch)
+   PERSISTENT  runtime/<root>/patches_tar/<slide_id>.tar   ← tiled ONCE, reused every run
+        │        (members: <slide_id>__x<X>_y<Y>.jpg; staging reads ~N_slides big files)
         └─ evict the node-local .svs
 ```
 
@@ -361,15 +363,16 @@ per-model venvs) before extracting. Nothing is assumed to pre-exist.
 ```bash
 mkdir -p logs
 
-# ── FULL run (GPU): tile+persist ALL patches → all models → train ────────────
-# Extraction runs on the full ~2.26M patches, so use the 2-day gpu walltime.
+# ── FULL run: 100% of ALL ~1400 slides (~500 GB TCGA), 8× H100, data-parallel ─
+# Tiles each SVS -> per-slide tar; extraction shards each model across 8 GPUs and
+# mean-pools to slide level. -G 8 -C GPU_MEM:80GB, --nodes=1, ~30 h walltime.
 sbatch jobs/final_setup.sh
-#   knobs: FINAL_CONFIG (default configs/tcga_tiled.yaml; tcga_staged.yaml = thumbnails),
-#          FINAL_TARGET_GB (subset size), PFM_TCGA_ROOT (data root), PFM_OUTPUT_DIR
+#   knobs: FINAL_TARGET_GB (cap size; default = null = ALL 500 GB), PFM_RUN_MODE
+#          (shard|queue), FINAL_CONFIG, PFM_TCGA_ROOT, PFM_OUTPUT_DIR
 
-# ── MINI run (GPU): same setup, extract on a 1/10 SAMPLE → fits a short walltime
+# ── MINI run: 1% sample of a ~50 GB subset, 4 general GPUs → ~15 min, 30 min cap
 sbatch jobs/final_setup_mini.sh
-#   knob: MINI_FRACTION (default 10 → use 1/10 of the persisted patches)
+#   knobs: MINI_FRACTION (default 100 → 1/100 = 1%), FINAL_TARGET_GB (default 50)
 
 # ── watch ────────────────────────────────────────────────────────────────────
 squeue --me
