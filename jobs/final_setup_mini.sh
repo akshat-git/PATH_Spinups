@@ -16,7 +16,7 @@
 
 # =============================================================================
 #  final_setup_mini.sh -- IDENTICAL to final_setup.sh, but extraction runs on only
-#  a 1/MINI_FRACTION SAMPLE (default 10%) of the persisted patch tiles. Same setup,
+#  a 1/MINI_FRACTION SAMPLE (default 1%) of the persisted patch tiles. Same setup,
 #  same models, same benchmark -- ~10x less GPU work, so it fits a short walltime.
 #
 #  Fully self-bootstrapping / failsafe (an external party can run this on a fresh
@@ -36,7 +36,7 @@
 #         patches to node-local SSD -> extract (GPU) -> benchmark (train probes).
 #
 #  Submit:  mkdir -p logs && sbatch jobs/final_setup_mini.sh
-#  Knobs:   MINI_FRACTION (default 10 -> use 1/10 of the patches)
+#  Knobs:   MINI_FRACTION (default 100 -> use 1/100 = 1% of the patches)
 #           FINAL_CONFIG (default configs/tcga_tiled.yaml; set tcga_staged.yaml for
 #           the coarse 1-thumbnail/slide path)   FINAL_TARGET_GB (config default: 50)
 #           PFM_TCGA_ROOT (cache + persisted patches location)
@@ -98,12 +98,12 @@ DATASET="$TCGA/tables/dataset.csv"
 # for the coarse 1-thumbnail/slide path instead.
 CONFIG="${FINAL_CONFIG:-configs/tcga_tiled.yaml}"
 
-# MINI: extraction reads only 1 in MINI_FRACTION of the persisted patches (default 10 = 10%).
+# MINI: extraction reads only 1 in MINI_FRACTION of the persisted patches (default 100 = 1%).
 # STEP 2 still tiles+packs the FULL set; the mini just STRIDES tar members at read time via
 # PFM_PATCH_STRIDE (so staging is identical to the full run -- same tar-shards -- only the GPU
-# work is reduced). Clamp a bad value (non-integer or 0) back to 10.
-MINI_FRACTION="${MINI_FRACTION:-10}"
-case "$MINI_FRACTION" in ''|*[!0-9]*|0) MINI_FRACTION=10;; esac
+# work is reduced). Clamp a bad value (non-integer or 0) back to 100.
+MINI_FRACTION="${MINI_FRACTION:-100}"
+case "$MINI_FRACTION" in ''|*[!0-9]*|0) MINI_FRACTION=100;; esac
 export PFM_PATCH_STRIDE="$MINI_FRACTION"   # STEP 4 (shared with final_setup) honors this
 
 hr(){ echo "============================================================"; }
