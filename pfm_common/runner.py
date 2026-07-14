@@ -58,6 +58,21 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
 
     dev = config.device()
     print(f"[{name}] device={dev} (uses GPU if available, else CPU).", flush=True)
+
+    # RESUMABLE (GCP spot / preemption): if THIS (model, shard) already produced its output,
+    # skip it -- don't even load the model. Lets a killed run restart and continue from the
+    # next unfinished shard. PFM_FORCE=1 re-extracts. Merged-model files short-circuit the
+    # whole model in cmd_run; this handles the per-shard case.
+    _out_dir = config.output_dir_for(name)
+    _done = os.path.join(
+        _out_dir,
+        f"patch_embeddings.shard{config.SHARD_INDEX}of{config.SHARD_COUNT}.pt"
+        if config.SHARD_COUNT > 1 else "patch_embeddings.pt",
+    )
+    if os.path.exists(_done) and not config.FORCE:
+        print(f"[{name}] already extracted -> {_done} (resumable skip; PFM_FORCE=1 to redo)", flush=True)
+        return _done
+
     # Load weights, but treat a gated / unauthorized HF repo as "access not granted"
     # rather than a hard failure: print a clear message and exit 75 so the caller can
     # disregard this model instead of counting it as a bug.

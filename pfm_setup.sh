@@ -556,7 +556,13 @@ cmd_run() {
   if [[ "$ngpu" -gt 1 && "${PFM_RUN_MODE:-queue}" == "shard" ]]; then
     log "run: DATA-PARALLEL -- each of ${#targets[@]} models sharded across $ngpu GPUs"
     local ok=() bad=() g r mrc
+    local outroot="${PFM_OUTPUT_DIR:-$PFM_ROOT/embeddings}"
     for m in "${targets[@]}"; do
+      # RESUMABLE: a fully-merged model's shard files are gone, so skip the whole model here
+      # (else its shards would re-extract). Per-shard resume is handled inside run_one.
+      if [[ -f "$outroot/$m/patch_embeddings.pt" && "${PFM_FORCE:-0}" != "1" ]]; then
+        log "[$m] already extracted (merged) -> skip (resumable; PFM_FORCE=1 to redo)"; ok+=("$m"); continue
+      fi
       log "[$m] sharding across $ngpu GPUs (PFM_SHARD_COUNT=$ngpu)"
       local rcdir; rcdir="$(mktemp -d "${TMP_DIR:-/tmp}/pfm_shard.XXXXXX")"
       for ((g=0; g<ngpu; g++)); do

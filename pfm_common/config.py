@@ -52,6 +52,9 @@ PATCH_STRIDE = _int_env("PFM_PATCH_STRIDE", 1)     # keep every Nth tile (1=all;
 # so their slide-level embeddings just concatenate (see pfm_common.merge_shards).
 SHARD_INDEX = _int_env("PFM_SHARD_INDEX", 0)       # 0..SHARD_COUNT-1
 SHARD_COUNT = _int_env("PFM_SHARD_COUNT", 1)       # 1 = no data-parallel sharding
+# Resumability (GCP spot / preemption): if a (model, shard)'s output already exists, skip it.
+# PFM_FORCE=1 forces re-extraction (e.g. after changing the sample/params).
+FORCE = _int_env("PFM_FORCE", 0)
 BATCH_SIZE = _int_env("PFM_BATCH_SIZE", 8)         # spec-driven in final_setup; this is the ad-hoc fallback
 NUM_WORKERS = _int_env("PFM_NUM_WORKERS", 2)       # ""
 AMP_DTYPE = _env("PFM_AMP_DTYPE", "auto")          # auto|float16|bfloat16|float32 (auto: bf16 if GPU supports, else fp16)

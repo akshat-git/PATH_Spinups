@@ -283,6 +283,42 @@ work whether submitted from the repo root or `jobs/`.
    Lustre storm), extraction **pools to slide level** (embeddings ~MB not 100s GB), and
    **data-parallel shard** spreads a model across GPUs. Full 500 GB run fits the ~30 h walltime.
 
+## Resumability & GCP spot (HARD REQUIREMENT)
+
+The **full run is intended for GCP spot instances** — CPUs/GPUs can be preempted or die at
+any moment. **Every stage must be resumable**: a killed run, re-launched, continues from
+where it stopped and never redoes finished work or corrupts a half-written artifact.
+
+Resumability model (idempotent + atomic-write everywhere):
+- **Preprocessing (tile → pack → decode): resumable per SLIDE.** Each `slide_tiler`/
+  `pack_patches`/`decode_patches` unit writes `<slide>.<ext>.part` then atomically renames on
+  completion + writes a `<slide>.done` sentinel. A slide with `.done` is skipped; a slide
+  killed mid-write left only a `.part` (never mistaken for done) → redone next run.
+- **Extraction: resumable per (model, SHARD).** `runner` skips a shard whose
+  `patch_embeddings.shard<g>of<N>.pt` already exists; `pfm_setup.sh cmd_run` skips a whole
+  model whose merged `patch_embeddings.pt` exists (its shard files are gone post-merge).
+  `PFM_FORCE=1` re-extracts. **GAP:** there is no *within-shard* (per-slide) checkpoint yet,
+  so a shard preempted mid-flight re-does its ~N_slides on restart — fine for occasional
+  preemption, but for *frequent* spot kills the next step is saving each slide's pooled
+  vector as it completes so restart skips done slides.
+- **Benchmark**: cheap + fully re-runnable (reads existing embeddings).
+- **Env note:** the `jobs/*.sh` are **Slurm `sbatch`** (Sherlock). On GCP spot there's no
+  Slurm — a non-Slurm launcher is needed, but the resumable Python core (`pfm_setup.sh`,
+  `tcga/`, `pfm_common/`) is scheduler-agnostic and is what carries the resume logic.
+
+## In progress (preprocessing split — decided, partially built)
+
+Splitting CPU preprocessing out of the GPU job so 8 H100s aren't idle during tiling:
+- `tcga/decode_patches.py` (BUILT): parallel JPEG→raw pre-decode (process pool over slides;
+  per-slide `.bin` + `.done`, atomic, resumable). Removes libjpeg from the GPU run.
+- **PENDING decisions/wiring:** (1) storage codec for pre-decoded patches — user chose FULL
+  pre-decode; open choice is **raw (0 decode, ~4.3 TB)** vs **Zstd/LZ4-raw (~10-15× faster
+  decode than JPEG, ~2 TB)** — the decode's I/O is `stored bytes -> uint8[256,256,3]`.
+  (2) decode fan-out — process pool (current, robust) vs thread pool + PyTurboJPEG (true
+  GIL-free, user-preferred). (3) `data.py` raw/zstd read mode (memmap `.bin` → `Image.fromarray`
+  → existing transform, no libjpeg). (4) `jobs/preprocess.sh` (CPU-only, `PREP_SCOPE=mini|full`,
+  idempotent) that `final_setup{,_mini}.sh` CALL + verify (skip if done, else run).
+
 ## Gotchas
 
 - Never run heavy work on the login node — use `sh_dev` / `salloc` / `sbatch`.
