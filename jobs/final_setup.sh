@@ -10,7 +10,9 @@
                              # it'll shard across 8 of WHATEVER it lands on (incl. B200 if ever
                              # added; bump this to the B200's GPU_MEM then). Drop -C for any GPU.
 #SBATCH --nodes=1            # all 8 GPUs on ONE node (a process can't drive a GPU on another node)
-#SBATCH --cpus-per-task=32   # ~4 dataloader workers/GPU across 8 GPUs (32/8); raise if the node has more
+#SBATCH --cpus-per-task=64   # 8 dataloader (JPEG-decode) workers/GPU (64/8) -- the 8-GPU H100
+                             # node (sh04-01n01) has 64 cores. More workers keep the fast GPUs
+                             # fed on CPU decode; drop if the node has fewer cores.
 #SBATCH --mem=128G           # RAM = bounded prefetch window x 8 model procs (streaming, no preload);
                              # independent of dataset size. ~12G/proc x 8 shards + headroom.
 #SBATCH --time=1-06:00:00    # ALL ~1400 slides / ~22.6M patches: one-time tile ~5-10h + extract
