@@ -110,7 +110,9 @@ def benchmark_one(emb_path, labels, n_classes, val_frac, epochs, lr, seed, min_s
     )
     m = metrics.compute_all(y_true, y_pred, y_prob, n_classes)
     m["n_total"] = len(y)
-    m["n_patches"] = len(paths)
+    # total patches pooled for this model (slide-level blob carries n_patches; legacy
+    # per-patch blob has "paths"). `paths` no longer exists in the slide-level path.
+    m["n_patches"] = int(blob.get("n_patches") or len(blob.get("paths", [])) or len(y))
     m["dim"] = int(Xk.shape[1])
     return m
 
