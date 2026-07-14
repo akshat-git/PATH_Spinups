@@ -234,6 +234,7 @@ model_clone() {
   case "$1" in
     gigapath)    echo "https://github.com/prov-gigapath/prov-gigapath|1" ;;
     exaone-path) echo "https://github.com/LG-AI-EXAONE/EXAONE-Path-2.5.git|0" ;;
+    hipt)        echo "https://github.com/mahmoodlab/HIPT|0" ;;  # HIPT_4K/ code on sys.path (hipt_spin)
     *)           echo "" ;;
   esac
 }
@@ -345,6 +346,41 @@ cmd_build() {
 }
 
 # -----------------------------------------------------------------------------
+# ensure_model_assets : clone a model's git repo + fetch any non-pip weights.
+#   Runs EVEN WHEN the venv already exists -- a runtime can have the venv but be missing
+#   the cloned repo / checkpoint that the model imports at load() (hipt's HIPT_4K,
+#   gigapath/exaone repos). Idempotent: skips a repo already cloned / a checkpoint present.
+# -----------------------------------------------------------------------------
+ensure_model_assets() {
+  local m="$1"
+  local clone_spec; clone_spec="$(model_clone "$m")"
+  if [[ -n "$clone_spec" ]]; then
+    local url="${clone_spec%%|*}"
+    local name; name="$(basename "${url%.git}")"
+    local clone_path="$REPO_DIR/$name"
+    if [[ ! -d "$clone_path/.git" ]]; then
+      ensure_git
+      mkdir -p "$REPO_DIR"
+      log "[$m] cloning $url -> $clone_path"
+      git clone --depth 1 "$url" "$clone_path" || warn "[$m] git clone failed ($url)"
+    fi
+  fi
+  # hipt: the checkpoint committed to the repo is a git-LFS POINTER (~130 B), not the real
+  # weights -- fetch the ~700 MB file from GitHub's LFS media endpoint (git clone --depth 1
+  # without git-lfs leaves the pointer). hipt_spin.py reads it from this exact path.
+  if [[ "$m" == "hipt" ]]; then
+    local ckpt="$REPO_DIR/HIPT/HIPT_4K/Checkpoints/vit256_small_dino.pth"
+    local sz; sz="$(stat -c%s "$ckpt" 2>/dev/null || echo 0)"
+    if [[ "${sz:-0}" -lt 1000000 ]]; then
+      log "[hipt] fetching ViT-256 checkpoint (~700 MB, git-LFS media)"
+      mkdir -p "$(dirname "$ckpt")"
+      curl -fSL "https://media.githubusercontent.com/media/mahmoodlab/HIPT/master/HIPT_4K/Checkpoints/vit256_small_dino.pth" \
+        -o "$ckpt" || warn "[hipt] checkpoint download failed -- set PFM_HIPT_CKPT to a local copy"
+    fi
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # setup_one : create venv + clone repos + install deps for one model
 # -----------------------------------------------------------------------------
 setup_one() {
@@ -361,12 +397,16 @@ setup_one() {
   vpy="$(venv_python "$m")"
   vpip="$(venv_pip "$m")"
 
-  # 0) idempotent skip: a venv whose pyvenv.cfg exists is treated as already set up --
-  # just move on (this is what lets `final_setup.sh` re-run cheaply). The venv python is
-  # a container-only symlink, so pyvenv.cfg -- not `-x python` -- is the host-visible
-  # marker. Delete the venv dir (or run `pfm_setup.sh clean`) to force a fresh reinstall.
+  # 0a) ensure external assets (git clone + non-pip checkpoints) FIRST -- these can be
+  # missing even when the venv already exists (e.g. a rebuilt runtime), and the model
+  # imports them at load(). This is what fixes "venv present but HIPT_4K missing".
+  ensure_model_assets "$m"
+
+  # 0b) idempotent skip: a venv whose pyvenv.cfg exists is treated as already set up (assets
+  # were just ensured above). The venv python is a container-only symlink, so pyvenv.cfg --
+  # not `-x python` -- is the host-visible marker. `pfm_setup.sh clean` forces a reinstall.
   if [[ -f "$venv/pyvenv.cfg" ]]; then
-    log "[$m] venv already present -> $venv (skipping setup)"
+    log "[$m] venv already present -> $venv (skipping venv/pip)"
     return 0
   fi
 
@@ -381,21 +421,13 @@ setup_one() {
   arun "$PROJECT_DIR" "$vpip" install --upgrade pip setuptools wheel \
     || warn "[$m] pip self-upgrade failed (continuing)"
 
-  # 3) clone any git repos into $SCRATCH (never into $HOME / project dir)
+  # 3) locate the cloned repo (ensure_model_assets already cloned it) for the editable install
   local clone_spec; clone_spec="$(model_clone "$m")"
   local clone_path=""
   if [[ -n "$clone_spec" ]]; then
     local url="${clone_spec%%|*}"
-    local editable="${clone_spec##*|}"
     local name; name="$(basename "${url%.git}")"
     clone_path="$REPO_DIR/$name"
-    if [[ ! -d "$clone_path/.git" ]]; then
-      log "[$m] cloning $url -> $clone_path"
-      git clone --depth 1 "$url" "$clone_path" \
-        || { err "[$m] git clone failed"; return 1; }
-    else
-      log "[$m] repo already cloned: $clone_path"
-    fi
   fi
 
   # 4) install common + model-specific pip packages
@@ -492,6 +524,19 @@ cmd_run() {
   on_login_node_warn
   local targets=("$@"); [[ ${#targets[@]} -eq 0 ]] && targets=("${MODELS[@]}")
   local rc_worst=0 rc
+
+  # Self-heal before launching: ensure each target's external assets (git clone / hipt
+  # checkpoint) exist, and build any MISSING venv. Done sequentially here so parallel shards
+  # of one model never race to build it, and so a run works even without a prior `setup`.
+  local _m
+  for _m in "${targets[@]}"; do
+    [[ -d "$PROJECT_DIR/models/$_m" ]] || continue
+    ensure_model_assets "$_m"
+    if [[ ! -f "$(venv_path "$_m")/pyvenv.cfg" ]]; then
+      warn "[$_m] venv missing -> building it before the run"
+      setup_one "$_m" || warn "[$_m] setup failed -- the run will skip this model"
+    fi
+  done
 
   # PFM_RUN_GPUS>1: run one model per GPU via a WORK QUEUE. A GPU takes the next
   # pending model the INSTANT it frees, instead of waiting for a whole "wave" to finish.

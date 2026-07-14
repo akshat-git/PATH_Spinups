@@ -75,6 +75,29 @@ def _dir_has_tars(d):
     return False
 
 
+def _balanced_shard_assign(tars, shard_count):
+    """Assign each tar to a GPU shard so total PATCHES per shard are balanced (LPT greedy),
+    using the per-slide counts in the `<tar>.done` sentinels (pack/tiler wrote them). Sharding
+    by tar *index* gives uneven work because slides vary a lot in patch count; this balances by
+    weight instead. Deterministic (every process computes the same map). Missing sentinel ->
+    weight 1. Returns {tar_path: shard_index}."""
+    weighted = []
+    for t in tars:
+        try:
+            n = int(open(t[:-4] + ".done").read().strip())
+        except (OSError, ValueError):
+            n = 1
+        weighted.append((n, t))
+    weighted.sort(key=lambda x: (-x[0], x[1]))        # heaviest first, path tie-break
+    loads = [0] * shard_count
+    assign = {}
+    for n, t in weighted:
+        g = min(range(shard_count), key=lambda i: (loads[i], i))
+        assign[t] = g
+        loads[g] += n
+    return assign
+
+
 def resolve_patch_root():
     """Return ``(mode, root, recursive)``:
         ('tars',  dir, None)  -- PFM_PATCH_DIR holds per-slide .tar shards
@@ -175,6 +198,9 @@ def make_streaming_dataset(transform, stride=None):
     shard_index = config.SHARD_INDEX
     shard_count = max(1, config.SHARD_COUNT)
     mode, root, recursive = resolve_patch_root()
+    # Balance tars across GPU shards by patch count (not tar count) so no shard straggles.
+    tar_shard = _balanced_shard_assign(list(_iter_tars(root)), shard_count) \
+        if (mode == "tars" and shard_count > 1) else None
 
     class PatchIterableDataset(IterableDataset):
         def __iter__(self):
@@ -189,12 +215,12 @@ def make_streaming_dataset(transform, stride=None):
                 yield from self._iter_loose(wid, nw)
 
         def _iter_tars(self, wid, nw):
-            # Two levels: this GPU process takes tars where ti % shard_count == shard_index
-            # (a DISJOINT set of whole slides); among THOSE, worker wid takes every nw-th.
-            # Union over all (process, worker) pairs = every tar exactly once.
+            # Two levels: this GPU process takes the tars assigned to its shard (a DISJOINT,
+            # patch-count-balanced set of whole slides); among THOSE, worker wid takes every
+            # nw-th. Union over all (process, worker) pairs = every tar exactly once.
             j = 0
-            for ti, tarpath in enumerate(_iter_tars(root)):
-                if (ti % shard_count) != shard_index:
+            for tarpath in _iter_tars(root):
+                if tar_shard is not None and tar_shard.get(tarpath, 0) != shard_index:
                     continue
                 if (j % nw) == wid:
                     with tarfile.open(tarpath, "r") as tf:
