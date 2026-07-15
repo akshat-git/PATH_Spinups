@@ -39,6 +39,12 @@ from . import config
 
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 
+# Raw pre-decoded patches (tcga/decode_patches.py): patches_raw/<slide>.bin = N contiguous
+# RAW_HW x RAW_HW x 3 uint8 patches, ZERO decode at train time (memmap + slice). Preferred
+# input when present -- it removes libjpeg from the GPU run entirely.
+RAW_HW = 256
+RAW_BYTES = RAW_HW * RAW_HW * 3
+
 
 # ── loose-file streaming (fallback: thumbnails, or unpacked patches) ─────────────
 def _iter_image_paths(root, recursive=True):
@@ -75,6 +81,60 @@ def _dir_has_tars(d):
     return False
 
 
+# ── raw pre-decoded streaming (preferred when present) ───────────────────────────
+def _iter_bins(bins_dir):
+    """Sorted per-slide `.bin` paths under ``bins_dir`` (deterministic order)."""
+    with os.scandir(bins_dir) as it:
+        names = sorted(e.name for e in it if e.is_file() and e.name.endswith(".bin"))
+    for n in names:
+        yield os.path.join(bins_dir, n)
+
+
+def _dir_has_bins(d):
+    with os.scandir(d) as it:
+        for e in it:
+            if e.is_file() and e.name.endswith(".bin"):
+                return True
+    return False
+
+
+def _bin_patch_count(bin_path):
+    """Patches in one raw bin: the `.done` sentinel if present, else filesize / RAW_BYTES."""
+    try:
+        return int(open(bin_path[:-4] + ".done").read().strip())
+    except (OSError, ValueError):
+        try:
+            return os.path.getsize(bin_path) // RAW_BYTES
+        except OSError:
+            return 0
+
+
+def _under(path, base):
+    """True if `path` is inside directory `base` (both made absolute)."""
+    if not base:
+        return False
+    a = os.path.abspath(path)
+    b = os.path.abspath(base)
+    return a == b or a.startswith(b + os.sep)
+
+
+def _rawcache_dir(source_root):
+    """Resolve the node-local SSD dir to stream raw bins through, or None to read Lustre direct.
+    None when: disabled (PFM_RAWCACHE=off), no dir configured, the dir can't be made, or the
+    source bins are ALREADY node-local (no point copying SSD->SSD)."""
+    mode = str(config.RAWCACHE).lower()
+    if mode in ("0", "off", "false", "no", "none"):
+        return None
+    base = config.RAWCACHE_DIR
+    if not base or _under(source_root, config.LSCRATCH):   # source already on the SSD -> read direct
+        return None
+    try:
+        os.makedirs(base, exist_ok=True)
+        return base
+    except OSError:
+        return None
+
+
 def _balanced_shard_assign(tars, shard_count):
     """Assign each tar to a GPU shard so total PATCHES per shard are balanced (LPT greedy),
     using the per-slide counts in the `<tar>.done` sentinels (pack/tiler wrote them). Sharding
@@ -100,12 +160,16 @@ def _balanced_shard_assign(tars, shard_count):
 
 def resolve_patch_root():
     """Return ``(mode, root, recursive)``:
+        ('raw',   dir, None)  -- PFM_PATCH_DIR holds per-slide .bin (pre-decoded; ZERO decode)
         ('tars',  dir, None)  -- PFM_PATCH_DIR holds per-slide .tar shards
         ('loose', dir, bool)  -- PFM_PATCH_DIR / thumbnails hold loose images
         (None, None, None)    -- nothing found
-    Non-emptiness is checked cheaply (first tar / first image), never a full listing."""
+    Priority raw > tars > loose (raw is fastest to feed). Non-emptiness is checked cheaply
+    (first bin / tar / image), never a full listing."""
     pd = config.PATCH_DIR
     if pd and os.path.isdir(pd):
+        if _dir_has_bins(pd):
+            return "raw", pd, None
         if _dir_has_tars(pd):
             return "tars", pd, None
         for _ in _iter_image_paths(pd, recursive=True):
@@ -123,7 +187,11 @@ def count_patch_images(mode, root, recursive, stride=1):
     import tarfile
     stride = max(1, stride)
     total = 0
-    if mode == "tars":
+    if mode == "raw":
+        for binpath in _iter_bins(root):
+            n = _bin_patch_count(binpath)
+            total += (n + stride - 1) // stride          # ceil(n/stride) kept per slide
+    elif mode == "tars":
         for tarpath in _iter_tars(root):
             n = None
             done = tarpath[:-4] + ".done"
@@ -198,9 +266,14 @@ def make_streaming_dataset(transform, stride=None):
     shard_index = config.SHARD_INDEX
     shard_count = max(1, config.SHARD_COUNT)
     mode, root, recursive = resolve_patch_root()
-    # Balance tars across GPU shards by patch count (not tar count) so no shard straggles.
-    tar_shard = _balanced_shard_assign(list(_iter_tars(root)), shard_count) \
-        if (mode == "tars" and shard_count > 1) else None
+    # Balance whole slides across GPU shards by patch count (not file count) so no shard
+    # straggles -- same LPT logic for tar shards and raw bins (both have <slide>.done counts).
+    if shard_count > 1 and mode == "tars":
+        file_shard = _balanced_shard_assign(list(_iter_tars(root)), shard_count)
+    elif shard_count > 1 and mode == "raw":
+        file_shard = _balanced_shard_assign(list(_iter_bins(root)), shard_count)
+    else:
+        file_shard = None
 
     class PatchIterableDataset(IterableDataset):
         def __iter__(self):
@@ -209,10 +282,95 @@ def make_streaming_dataset(transform, stride=None):
             info = get_worker_info()
             wid = info.id if info is not None else 0
             nw = info.num_workers if info is not None else 1
-            if mode == "tars":
+            if mode == "raw":
+                yield from self._iter_raw(wid, nw)
+            elif mode == "tars":
                 yield from self._iter_tars(wid, nw)
             else:
                 yield from self._iter_loose(wid, nw)
+
+        def _iter_raw(self, wid, nw):
+            # Pre-decoded: memmap each <slide>.bin and slice patch i as uint8[H,W,3] -- NO libjpeg.
+            # Sharding mirrors tar mode (this GPU takes its balanced slide set; among those, worker
+            # wid takes every nw-th slide), so every patch is produced exactly once. The yielded
+            # name is "<sid>__<i>.raw" so runner._sid() recovers the slide_id.
+            #
+            # STREAMING SSD CACHE: the raw bins live on Lustre (too big for the SSD in full). This
+            # worker copies the NEXT slide's bin onto the node-local SSD while it reads the current
+            # one (depth-1 prefetch), memmaps from the SSD (pages -> DRAM on access), then DELETES
+            # the SSD copy -- a bounded ~2-bin window per worker, never the whole 4 TB. If the SSD
+            # is (near) full the copy is skipped and that slide is memmapped straight from Lustre
+            # (still zero-decode). See _rawcache_dir / config.RAWCACHE*.
+            import numpy as np
+            import shutil
+            from concurrent.futures import ThreadPoolExecutor
+
+            myslides = []
+            j = 0
+            for binpath in _iter_bins(root):
+                if file_shard is not None and file_shard.get(binpath, 0) != shard_index:
+                    continue
+                if (j % nw) == wid:
+                    myslides.append(binpath)
+                j += 1
+            if not myslides:
+                return
+
+            cache_dir = _rawcache_dir(root)
+            stager = ThreadPoolExecutor(max_workers=1) if cache_dir else None
+
+            def _stage(src):
+                """Copy one Lustre bin -> SSD (atomic); return local path, or None to read Lustre
+                direct (SSD full / copy failed / size mismatch). Self-limiting on free space."""
+                need = _bin_patch_count(src) * RAW_BYTES
+                try:
+                    if need <= 0 or shutil.disk_usage(cache_dir).free < int(need * 1.15):
+                        return None                       # leave headroom; fall back to Lustre
+                    dst = os.path.join(cache_dir, os.path.basename(src))
+                    tmp = "%s.tmp%d" % (dst, os.getpid())
+                    shutil.copyfile(src, tmp)             # sequential Lustre read -> SSD write
+                    if os.path.getsize(tmp) != need:
+                        os.remove(tmp)
+                        return None
+                    os.replace(tmp, dst)                  # atomic: a partial copy never looks whole
+                    return dst
+                except OSError:                            # ENOSPC / transient FS error -> Lustre
+                    return None
+
+            def _evict(path):
+                if path and cache_dir and _under(path, cache_dir):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+            fut = stager.submit(_stage, myslides[0]) if stager else None
+            try:
+                for k, src in enumerate(myslides):
+                    local = fut.result() if fut else None
+                    # kick off the NEXT slide's copy so it overlaps this slide's reads (depth 1)
+                    fut = stager.submit(_stage, myslides[k + 1]) \
+                        if (stager and k + 1 < len(myslides)) else None
+                    sid = os.path.basename(src)[:-4]
+                    n = _bin_patch_count(src)              # count from Lustre .done (canonical)
+                    read_path = local or src               # SSD copy if staged, else Lustre direct
+                    if n <= 0:
+                        _evict(local)
+                        continue
+                    mm = np.memmap(read_path, dtype=np.uint8, mode="r",
+                                   shape=(n, RAW_HW, RAW_HW, 3))
+                    try:
+                        for i in range(0, n, stride):      # 1/stride sample, same as tar mode
+                            # np.array (not asarray) COPIES the 192 KB patch into DRAM, decoupled
+                            # from the memmap -- so del mm + evict can't invalidate an in-flight patch.
+                            img = Image.fromarray(np.array(mm[i]))     # DRAM copy, no decode
+                            yield transform(img), "%s__%d.raw" % (sid, i)
+                    finally:
+                        del mm
+                        _evict(local)                      # free the SSD window immediately
+            finally:
+                if stager:
+                    stager.shutdown(wait=False)
 
         def _iter_tars(self, wid, nw):
             # Two levels: this GPU process takes the tars assigned to its shard (a DISJOINT,
@@ -220,7 +378,7 @@ def make_streaming_dataset(transform, stride=None):
             # nw-th. Union over all (process, worker) pairs = every tar exactly once.
             j = 0
             for tarpath in _iter_tars(root):
-                if tar_shard is not None and tar_shard.get(tarpath, 0) != shard_index:
+                if file_shard is not None and file_shard.get(tarpath, 0) != shard_index:
                     continue
                 if (j % nw) == wid:
                     with tarfile.open(tarpath, "r") as tf:

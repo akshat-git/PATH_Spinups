@@ -85,8 +85,11 @@ fi
 # Data-pipeline deps only (NOT the training stack). openslide-bin = prebuilt lib.
 # tifffile: read each slide's embedded thumbnail via HTTP Range (streaming path,
 # src/data/tcga/slide_streamer.py) without downloading the whole SVS.
+# opencv-python-headless: wheel-bundled libjpeg-turbo for the GIL-free, byte-level
+# parallel patch decode (tcga/decode_patches.py) -- no system libs needed.
 TCGA_DEPS="pandas>=2.0 numpy>=1.24 omegaconf>=2.3 requests>=2.31 pillow>=9.5 \
-openslide-python>=1.4.3 openslide-bin>=4.0.0.11 tifffile>=2024.1.30 pyarrow tqdm"
+openslide-python>=1.4.3 openslide-bin>=4.0.0.11 tifffile>=2024.1.30 pyarrow tqdm \
+opencv-python-headless>=4.8"
 
 # ── Build the venv + verify, inside the container ────────────────────────────
 "$TOOL" exec \

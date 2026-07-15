@@ -46,6 +46,11 @@ patches:
   jpeg_quality: 85          # saved patch JPEG quality
   # patches_dir: null       # default: $PFM_TCGA_ROOT/patches (persistent on scratch)
 
+# Pre-decode spec -- CPU step (tcga/decode_patches.py) that expands patch tars into raw uint8
+# bins so the GPU run does ZERO JPEG decode. Byte-level parallel over a GIL-free thread pool.
+decode:
+  workers: 0                # 0 = all cores (os.cpu_count()); PFM_DECODE_WORKERS overrides
+
 # Compute / extraction spec -- jobs/final_setup.sh reads these and exports them as
 # PFM_BATCH_SIZE / PFM_NUM_WORKERS / PFM_AMP_DTYPE for the GPU run. Nothing hardcoded.
 compute:
@@ -68,6 +73,7 @@ steps:
   - manifest
   - tile_slides
   - pack_patches      # pack each slide's tiles into one patches_tar/<slide_id>.tar (fast staging)
+  - decode_patches    # pre-decode tars -> patches_raw/<slide>.bin (raw uint8; ZERO decode at GPU time)
   - download
   - gene_matrix
   - assemble

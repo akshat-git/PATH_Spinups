@@ -60,6 +60,16 @@ NUM_WORKERS = _int_env("PFM_NUM_WORKERS", 2)       # ""
 AMP_DTYPE = _env("PFM_AMP_DTYPE", "auto")          # auto|float16|bfloat16|float32 (auto: bf16 if GPU supports, else fp16)
 PREFETCH_FACTOR = _int_env("PFM_PREFETCH_FACTOR", 0)  # 0 = DataLoader default; else batches prefetched/worker
 
+# Streaming SSD cache for RAW bins. The full raw set (~4 TB) can't live on the node-local SSD,
+# so raw bins stay on Lustre ($SCRATCH) and each worker copies the NEXT slide's bin onto the SSD
+# just before reading it, memmaps it (pages fault into DRAM on access), then DELETES it -- a small
+# bounded window, not the whole dataset. A worker self-limits: if the SSD is (nearly) full it reads
+# that slide's bin straight from Lustre instead (still zero-decode). Disabled if no SSD dir.
+LSCRATCH = _env("L_SCRATCH", "")
+RAWCACHE = _env("PFM_RAWCACHE", "auto")            # auto|on|off (auto = on iff a cache dir resolves)
+RAWCACHE_DIR = _env("PFM_RAWCACHE_DIR",            # node-local SSD dir for the streamed bins
+                    os.path.join(LSCRATCH, "pfm_rawcache") if LSCRATCH else "")
+
 
 def device():
     """Return 'cuda' when a GPU is visible, else 'cpu'."""

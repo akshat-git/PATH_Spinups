@@ -135,27 +135,15 @@ fi
 # reused from disk, and any slide NOT cached is streamed into node-local and evicted.
 # So a PARTIAL dataset tops up to the target instead of being silently reused (the
 # old short-circuit bug).
-echo; echo "### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)"
-if [ -d "$TCGA/slides" ] && find "$TCGA/slides" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
-  echo "  pre-downloaded SVS cache present in $TCGA/slides -> thumbnail from disk where available, stream the rest"
-else
-  echo "  no SVS cache -> stream each slide into node-local (\$TMPDIR), thumbnail, evict (nothing large persists)"
-fi
-"$TOOL" exec \
-  -B "$MED_DIR:/workspace" -B "$RUNTIME:/runtime" -B "$TCGA:/tcga_data" \
-  ${L_SCRATCH:+-B "$L_SCRATCH"} \
-  --pwd /workspace "$TCGA_SIF" bash -c "
-    set -e
-    source /runtime/venvs/tcga_build/bin/activate
-    export PYTHONPATH=/workspace
-    export PIP_CACHE_DIR=/runtime/cache/pip
-    export TMPDIR=/runtime/tmp
-    export L_SCRATCH='${L_SCRATCH:-}'   # so stage_process stages to the node-local SSD
-    CMD=\"python -m build_tcga_dataset --config $CONFIG\"
-    [ -n '${FINAL_TARGET_GB:-}' ] && CMD=\"\$CMD download.target_gb=${FINAL_TARGET_GB:-}\"
-    echo \"INFO: \$CMD\"
-    eval \$CMD
-  " || fail "staged dataset build (build_tcga_dataset --config $CONFIG)"
+echo; echo "### STEP 2/5  preprocess: tile -> pack -> DECODE(raw) -> labels  (via jobs/preprocess.sh)"
+# Delegate ALL CPU preprocessing to the single source of truth (jobs/preprocess.sh): it
+# tiles/packs/decodes resumably and produces patches_raw/<sid>.bin (ZERO-decode GPU input) +
+# dataset.csv. This is the "call preprocess and verify" failsafe -- if you already ran
+# preprocess.sh standalone on a CPU node, every step here is a fast skip; if not, it runs
+# now (on this GPU node -- wasteful but correct). PREP_SKIP_CONTAINER=1: STEP 1 already
+# ensured the container.
+PREP_SCOPE=full PREP_SKIP_CONTAINER=1 FINAL_CONFIG="$CONFIG" \
+  bash "$MED_DIR/jobs/preprocess.sh" || fail "preprocess (jobs/preprocess.sh)"
 [ -f "$DATASET" ] || fail "no dataset.csv produced at $DATASET"
 echo "  dataset ready: $DATASET  ($(($(wc -l < "$DATASET") - 1)) rows)"
 
@@ -181,7 +169,8 @@ echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built
 # we stage ~N_slides big files instead of millions of tiny Lustre files (that metadata
 # storm timed STEP 4 out). Extraction streams tar members; PFM_PATCH_STRIDE keeps every
 # Nth tile (full run = 1 = all; the mini run exports MINI_FRACTION).
-echo; echo "### STEP 4/5  stage patch tar-shards to node-local SSD ($STAGE)"
+echo; echo "### STEP 4/5  stage patch input to node-local SSD ($STAGE)"
+RAW_SCRATCH="$TCGA/patches_raw"
 TARS_SCRATCH="$TCGA/patches_tar"
 PATCHES_SCRATCH="$TCGA/patches"
 INPUT_MODE=""
@@ -203,8 +192,30 @@ SSD_OK=0
 if [ -n "${L_SCRATCH:-}" ] && [ -d "${L_SCRATCH:-}" ]; then SSD_OK=1; fi
 [ "$SSD_OK" -eq 1 ] || echo "  NOTE: no node-local SSD (\$L_SCRATCH) here; staging target $STAGE is on Lustre."
 
+nraw=$(find "$RAW_SCRATCH" -maxdepth 1 -name '*.bin' 2>/dev/null | wc -l)
 ntars=$(find "$TARS_SCRATCH" -maxdepth 1 -name '*.tar' 2>/dev/null | wc -l)
-if [ "${ntars:-0}" -ge 1 ]; then
+if [ "${nraw:-0}" -ge 1 ]; then
+  # PREFERRED: pre-decoded raw uint8 bins (preprocess.sh / decode_patches) -> GPU does ZERO JPEG
+  # decode. The full raw set (~4 TB) can't live on the node-local SSD, so the bins STAY on Lustre
+  # and each dataloader worker STREAMS the next slide's bin onto the SSD just ahead of use, memmaps
+  # it (pages -> DRAM), then evicts it -- a small bounded window, not the whole dataset. If the SSD
+  # fills, that slide is memmapped straight from Lustre (still zero-decode). data.py owns this.
+  need=$(du -sb "$RAW_SCRATCH" 2>/dev/null | awk '{print $1+0}')
+  export PFM_PATCH_DIR="$RAW_SCRATCH"                 # source of truth = Lustre raw bins
+  if [ "$SSD_OK" -eq 1 ]; then
+    export PFM_RAWCACHE="auto"
+    export PFM_RAWCACHE_DIR="$STAGE/pfm_rawcache"
+    mkdir -p "$PFM_RAWCACHE_DIR"
+    INPUT_MODE="RAW bins ($nraw slides, ~$((need/1024/1024/1024)) GB on Lustre) STREAMED -> node-local SSD cache (bounded+evicted; ZERO decode)"
+    echo "  raw source: $RAW_SCRATCH (Lustre); per-slide stream into SSD cache $PFM_RAWCACHE_DIR, evicted after use -> dataloaders stay full, no 4 TB on SSD"
+  else
+    export PFM_RAWCACHE="off"
+    INPUT_MODE="RAW bins ($nraw slides, Lustre; memmap direct -- no SSD -- ZERO decode)"
+    fallback_banner "no node-local SSD on this node; GPU memmaps raw bins straight from Lustre" \
+      "\$L_SCRATCH absent -- no SSD cache to stream through." \
+      "still ZERO decode, but reads are off Lustre (large sequential) rather than SSD."
+  fi
+elif [ "${ntars:-0}" -ge 1 ]; then
   # Copy the ~N_slides tar-shards onto the node-local SSD (big sequential reads, no storm),
   # then the GPU streams tar members -> compute-bound. Also copy the .done sentinels (counts).
   TARS_LOCAL="$STAGE/patches_tar"

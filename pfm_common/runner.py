@@ -110,7 +110,7 @@ def run_patch_encoder(name, load_fn, embed_fn, gated=False):
         return None
     stride = max(1, config.PATCH_STRIDE)
     n_fed = data.count_patch_images(mode, root, recursive, stride=stride)
-    src = "tar shards" if mode == "tars" else "loose files"
+    src = {"raw": "raw pre-decoded bins", "tars": "tar shards"}.get(mode, "loose files")
     print(f"[{name}] streaming {n_fed} tiles from {root} ({src}"
           f"{f', stride 1/{stride}' if stride > 1 else ', no cap'}).", flush=True)
 

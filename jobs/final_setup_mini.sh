@@ -10,9 +10,9 @@
 #SBATCH --mem=48G            # RAM = bounded DataLoader prefetch window (workers x prefetch x
                              # batch), INDEPENDENT of dataset size -- identical for mini & full.
                              # Covers all 4 model procs' windows on this node (streaming, no preload).
-#SBATCH --time=00:30:00      # 1% run needs ~12-15 min (tar-stage + work-queue + benchmark);
-                             # 30 min is 2x margin and backfills faster. Raise MINI_FRACTION-
-                             # dependent: a bigger sample (smaller MINI_FRACTION) needs more.
+#SBATCH --time=00:45:00      # 1% run needs ~12-15 min (tar-stage + work-queue + benchmark), plus
+                             # the one-time raw pre-decode of the 142-slide subset the first time
+                             # STEP 2 runs it. 45 min gives margin for that decode + variance.
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -144,27 +144,13 @@ fi
 # reused from disk, and any slide NOT cached is streamed into node-local and evicted.
 # So a PARTIAL dataset tops up to the target instead of being silently reused (the
 # old short-circuit bug).
-echo; echo "### STEP 2/5  build/complete staged dataset (reuse cached SVS if present, else stream)"
-if [ -d "$TCGA/slides" ] && find "$TCGA/slides" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
-  echo "  pre-downloaded SVS cache present in $TCGA/slides -> thumbnail from disk where available, stream the rest"
-else
-  echo "  no SVS cache -> stream each slide into node-local (\$TMPDIR), thumbnail, evict (nothing large persists)"
-fi
-"$TOOL" exec \
-  -B "$MED_DIR:/workspace" -B "$RUNTIME:/runtime" -B "$TCGA:/tcga_data" \
-  ${L_SCRATCH:+-B "$L_SCRATCH"} \
-  --pwd /workspace "$TCGA_SIF" bash -c "
-    set -e
-    source /runtime/venvs/tcga_build/bin/activate
-    export PYTHONPATH=/workspace
-    export PIP_CACHE_DIR=/runtime/cache/pip
-    export TMPDIR=/runtime/tmp
-    export L_SCRATCH='${L_SCRATCH:-}'   # so stage_process stages to the node-local SSD
-    CMD=\"python -m build_tcga_dataset --config $CONFIG\"
-    [ -n '${FINAL_TARGET_GB:-}' ] && CMD=\"\$CMD download.target_gb=${FINAL_TARGET_GB:-}\"
-    echo \"INFO: \$CMD\"
-    eval \$CMD
-  " || fail "staged dataset build (build_tcga_dataset --config $CONFIG)"
+echo; echo "### STEP 2/5  preprocess: tile -> pack -> DECODE(raw) -> labels  (via jobs/preprocess.sh, mini scope)"
+# Delegate ALL CPU preprocessing to jobs/preprocess.sh (single source of truth): resumable
+# tile/pack/decode -> patches_raw/<sid>.bin (ZERO-decode GPU input) + dataset.csv, capped to
+# the mini's FINAL_TARGET_GB subset. Already-done slides are fast skips. PREP_SKIP_CONTAINER=1:
+# STEP 1 above already ensured the container.
+PREP_SCOPE=mini PREP_SKIP_CONTAINER=1 FINAL_CONFIG="$CONFIG" FINAL_TARGET_GB="${FINAL_TARGET_GB:-50}" \
+  bash "$MED_DIR/jobs/preprocess.sh" || fail "preprocess (jobs/preprocess.sh)"
 [ -f "$DATASET" ] || fail "no dataset.csv produced at $DATASET"
 echo "  dataset ready: $DATASET  ($(($(wc -l < "$DATASET") - 1)) rows)"
 
@@ -189,7 +175,8 @@ echo "  ensuring per-model venvs (pfm_setup.sh setup -- skips ones already built
 # Same staging as final_setup (identical tar-shards); the mini differs ONLY by
 # PFM_PATCH_STRIDE (exported above = MINI_FRACTION), which makes extraction read 1/N of each
 # slide's tar members. So staging is fast/complete and the GPU work is ~1/N.
-echo; echo "### STEP 4/5  stage patch tar-shards to node-local SSD ($STAGE)  [read stride 1/$MINI_FRACTION]"
+echo; echo "### STEP 4/5  stage patch input to node-local SSD ($STAGE)  [read stride 1/$MINI_FRACTION]"
+RAW_SCRATCH="$TCGA/patches_raw"
 TARS_SCRATCH="$TCGA/patches_tar"
 PATCHES_SCRATCH="$TCGA/patches"
 INPUT_MODE=""
@@ -211,8 +198,28 @@ SSD_OK=0
 if [ -n "${L_SCRATCH:-}" ] && [ -d "${L_SCRATCH:-}" ]; then SSD_OK=1; fi
 [ "$SSD_OK" -eq 1 ] || echo "  NOTE: no node-local SSD (\$L_SCRATCH) here; staging target $STAGE is on Lustre."
 
+nraw=$(find "$RAW_SCRATCH" -maxdepth 1 -name '*.bin' 2>/dev/null | wc -l)
 ntars=$(find "$TARS_SCRATCH" -maxdepth 1 -name '*.tar' 2>/dev/null | wc -l)
-if [ "${ntars:-0}" -ge 1 ]; then
+if [ "${nraw:-0}" -ge 1 ]; then
+  # PREFERRED: pre-decoded raw uint8 bins (preprocess) -> GPU does ZERO JPEG decode. Bins stay on
+  # Lustre; each worker STREAMS the next slide's bin onto the SSD ahead of use, memmaps it, evicts
+  # it (bounded window, not the whole set). SSD full -> memmap straight from Lustre. data.py owns it.
+  need=$(du -sb "$RAW_SCRATCH" 2>/dev/null | awk '{print $1+0}')
+  export PFM_PATCH_DIR="$RAW_SCRATCH"                 # source of truth = Lustre raw bins
+  if [ "$SSD_OK" -eq 1 ]; then
+    export PFM_RAWCACHE="auto"
+    export PFM_RAWCACHE_DIR="$STAGE/pfm_rawcache"
+    mkdir -p "$PFM_RAWCACHE_DIR"
+    INPUT_MODE="RAW bins ($nraw slides, ~$((need/1024/1024/1024)) GB on Lustre) STREAMED -> SSD cache (bounded+evicted; ZERO decode; read 1/$MINI_FRACTION)"
+    echo "  raw source: $RAW_SCRATCH (Lustre); per-slide stream into SSD cache $PFM_RAWCACHE_DIR, evicted after use"
+  else
+    export PFM_RAWCACHE="off"
+    INPUT_MODE="RAW bins ($nraw slides, Lustre; memmap direct -- no SSD -- ZERO decode; read 1/$MINI_FRACTION)"
+    fallback_banner "no node-local SSD on this node; GPU memmaps raw bins straight from Lustre" \
+      "\$L_SCRATCH absent -- no SSD cache to stream through." \
+      "still ZERO decode, but reads are off Lustre (large sequential) rather than SSD."
+  fi
+elif [ "${ntars:-0}" -ge 1 ]; then
   TARS_LOCAL="$STAGE/patches_tar"
   mkdir -p "$TARS_LOCAL"
   echo "  staging $ntars slide tar-shards: $TARS_SCRATCH (Lustre) -> $TARS_LOCAL (node-local SSD)"

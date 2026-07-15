@@ -30,8 +30,8 @@ from tcga.slide_processor import SlideProcessor
 logger = logging.getLogger(__name__)
 
 VALID_STEPS = ["etl", "manifest", "download", "download_svs_cache", "stream_thumbnails",
-               "stage_process", "tile_slides", "pack_patches", "process_slides",
-               "gene_matrix", "assemble"]
+               "stage_process", "tile_slides", "pack_patches", "decode_patches",
+               "process_slides", "gene_matrix", "assemble"]
 
 
 class TCGADatasetBuilder:
@@ -94,6 +94,7 @@ class TCGADatasetBuilder:
             "stage_process": self.run_stage_process,
             "tile_slides": self.run_tile_slides,
             "pack_patches": self.run_pack_patches,
+            "decode_patches": self.run_decode_patches,
             "process_slides": self.run_process_slides,
             "gene_matrix": self.run_gene_matrix,
             "assemble": self.run_assemble,
@@ -460,6 +461,22 @@ class TCGADatasetBuilder:
         counts = pack_all(patches_dir, tars_dir)
         logger.info("Packed patches -> %s: %d slides packed, %d already, %d patches",
                     tars_dir, counts["packed"], counts["skipped"], counts["patches"])
+
+    # ── step 3f: pre-decode patch tars into raw uint8 bins (CPU, byte-level parallel) ──
+    def run_decode_patches(self) -> None:
+        """Pre-decode each patches_tar/<slide>.tar into patches_raw/<slide>.bin (raw uint8),
+        so the GPU run does ZERO JPEG decode. Byte-level parallel over a GIL-free thread pool
+        (cv2/libjpeg-turbo); resumable + atomic per slide. Reads decode.workers from config
+        (or PFM_DECODE_WORKERS / all cores)."""
+        from tcga.decode_patches import decode_all
+        tars_dir = self.tcga_config.data_dir / "patches_tar"
+        raw_dir = self.tcga_config.data_dir / "patches_raw"
+        dec_cfg = self.cfg.get("decode", {}) or {}
+        workers = int(os.environ.get("PFM_DECODE_WORKERS")
+                      or dec_cfg.get("workers", 0) or (os.cpu_count() or 8))
+        counts = decode_all(str(tars_dir), str(raw_dir), workers=workers)
+        logger.info("Decoded patches -> %s: %d decoded, %d already, %d patches, %d failed",
+                    raw_dir, counts["decoded"], counts["skipped"], counts["patches"], counts["failed"])
 
     # ── step 4: process slides ────────────────────────────────────────
 

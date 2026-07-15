@@ -70,10 +70,12 @@ configs/
   tcga_staged.yaml        #   staged full-SVS -> 1 thumbnail/slide (stage_process); FINAL_CONFIG override
 jobs/
   setup_tcga.sh           #   one-time: build tcga_build.sif + tcga_build venv (CPU/normal)
-  final_setup.sh          #   ★ FINAL run: self-bootstraps everything -> tile+persist ALL patches ->
-                          #     all models -> train (GPU). Failsafe: builds any missing container/venv/data.
-  final_setup_mini.sh     #   ★ same as final_setup.sh but extraction uses a 1/MINI_FRACTION (default 10%)
-                          #     SAMPLE of the persisted patches -> ~10x less GPU work, fits a short walltime.
+  preprocess.sh           #   ★ CPU-only preprocessing (PREP_SCOPE=mini|full): tile -> pack ->
+                          #     DECODE(raw) -> labels, resumable per slide. final_setup{,_mini} CALL it.
+  final_setup.sh          #   ★ FINAL run (GPU): self-bootstraps -> preprocess -> all models -> train.
+                          #     Failsafe: builds any missing container/venv/data.
+  final_setup_mini.sh     #   ★ same as final_setup.sh but extraction uses a 1/MINI_FRACTION (default 1%)
+                          #     SAMPLE of the persisted patches -> ~100x less GPU work, fits a short walltime.
   verify_tcga_env.py      #   sanity-checks the data-build venv imports (used by setup_tcga.sh)
 runtime/                  # ALL artifacts on $SCRATCH (mode 700). Git-ignored.
   containers/             #   pfm_base.sif + tcga_build.sif (both built)
@@ -182,22 +184,25 @@ the small artifact is kept.
 ## Config / env knobs
 
 `pfm_common/config.py` (env): `PFM_ROOT` (default `<repo>/runtime`), `PFM_TCGA_ROOT`,
-`PFM_PATCH_DIR` (dir of `.tar` shards OR loose images), `PFM_OUTPUT_DIR`, `PFM_SLIDE_FEATURES`,
-`PFM_MAX_IMAGES` (0=all), `PFM_BATCH_SIZE`, `PFM_NUM_WORKERS`, `PFM_PREFETCH_FACTOR`,
-`PFM_AMP_DTYPE`, `HF_TOKEN`. **Scaling knobs:** `PFM_PATCH_STRIDE` (keep every Nth tar member;
-1=all, mini=100 for 1%), `PFM_SHARD_INDEX`/`PFM_SHARD_COUNT` (data-parallel: this process
-takes tars where `tar_index % COUNT == INDEX`; COUNT=1 = off).
+`PFM_PATCH_DIR` (dir of raw `.bin` OR `.tar` shards OR loose images — resolved raw > tars > loose),
+`PFM_OUTPUT_DIR`, `PFM_SLIDE_FEATURES`, `PFM_MAX_IMAGES` (0=all), `PFM_BATCH_SIZE`,
+`PFM_NUM_WORKERS`, `PFM_PREFETCH_FACTOR`, `PFM_AMP_DTYPE`, `HF_TOKEN`. **Scaling knobs:**
+`PFM_PATCH_STRIDE` (keep every Nth patch; 1=all, mini=100 for 1%), `PFM_SHARD_INDEX`/
+`PFM_SHARD_COUNT` (data-parallel; each process takes a disjoint, patch-count-balanced set of
+whole slides). **Raw streaming-cache knobs:** `PFM_RAWCACHE` (auto|on|off), `PFM_RAWCACHE_DIR`
+(node-local SSD dir the raw bins stream through; default `$L_SCRATCH/pfm_rawcache`),
+`PFM_DECODE_WORKERS` (decode thread count), `PFM_FORCE` (re-extract even if output exists).
 
 ETL config (YAML): `download.slides`, `download.maf`, `download.max_files` (cap by count),
 `download.target_gb` (**cap by size; `null` = ALL slides = the full ~500 GB — final_setup's
-default**), `patches.{patch_size,level,tissue_thresh,...}`, `slides.stage_download_workers`,
-`gene_matrix.genes` (incl. `IDH1`/`IDH2` for the `idh` task), `steps`
-(`etl,manifest,tile_slides,pack_patches,download,gene_matrix,assemble`).
+default**), `patches.{patch_size,level,tissue_thresh,...}`, `decode.workers` (0=all cores),
+`slides.stage_download_workers`, `gene_matrix.genes` (incl. `IDH1`/`IDH2` for the `idh` task),
+`steps` (`etl,manifest,tile_slides,pack_patches,decode_patches,download,gene_matrix,assemble`).
 
 Job knobs: `FINAL_TARGET_GB` (override `download.target_gb`; mini sets 50), `MINI_FRACTION`
 (mini's 1/N sample → `PFM_PATCH_STRIDE`), `PFM_RUN_MODE` (`shard` = data-parallel per model,
-`queue` = one-model-per-GPU work queue), `FINAL_CONFIG`, `MED_PROJECT_DIR`/`PFM_REPO`/
-`PFM_PROJECT_DIR` (dir overrides).
+`queue` = one-model-per-GPU work queue), `PREP_SCOPE` (`mini`|`full` for preprocess.sh),
+`PREP_SKIP_CONTAINER`, `FINAL_CONFIG`, `MED_PROJECT_DIR`/`PFM_REPO`/`PFM_PROJECT_DIR` (dir overrides).
 
 ## Entrypoints (both GPU, both fully self-bootstrapping / failsafe)
 
@@ -306,18 +311,33 @@ Resumability model (idempotent + atomic-write everywhere):
   Slurm — a non-Slurm launcher is needed, but the resumable Python core (`pfm_setup.sh`,
   `tcga/`, `pfm_common/`) is scheduler-agnostic and is what carries the resume logic.
 
-## In progress (preprocessing split — decided, partially built)
+## Preprocessing / training split (BUILT) — raw pre-decode + streaming SSD cache
 
-Splitting CPU preprocessing out of the GPU job so 8 H100s aren't idle during tiling:
-- `tcga/decode_patches.py` (BUILT): parallel JPEG→raw pre-decode (process pool over slides;
-  per-slide `.bin` + `.done`, atomic, resumable). Removes libjpeg from the GPU run.
-- **PENDING decisions/wiring:** (1) storage codec for pre-decoded patches — user chose FULL
-  pre-decode; open choice is **raw (0 decode, ~4.3 TB)** vs **Zstd/LZ4-raw (~10-15× faster
-  decode than JPEG, ~2 TB)** — the decode's I/O is `stored bytes -> uint8[256,256,3]`.
-  (2) decode fan-out — process pool (current, robust) vs thread pool + PyTurboJPEG (true
-  GIL-free, user-preferred). (3) `data.py` raw/zstd read mode (memmap `.bin` → `Image.fromarray`
-  → existing transform, no libjpeg). (4) `jobs/preprocess.sh` (CPU-only, `PREP_SCOPE=mini|full`,
-  idempotent) that `final_setup{,_mini}.sh` CALL + verify (skip if done, else run).
+CPU preprocessing is split OUT of the GPU job so the GPUs never decode JPEG. **Codec = raw**
+(user: "size doesn't matter, speed does" → 0 decode at GPU time). **Fan-out = GIL-free threads**
+(not one-process-per-core).
+
+- **Preprocess (CPU, `jobs/preprocess.sh`, `PREP_SCOPE=mini|full`).** tile → pack → **decode** →
+  labels, all resumable per slide. `decode_patches` (`tcga/decode_patches.py`) expands each
+  `patches_tar/<sid>.tar` → `patches_raw/<sid>.bin` = N contiguous `uint8[256,256,3]` patches
+  (+ `.done`). **Byte-level parallel:** a thread pool decodes K JPEGs at once (decoder releases
+  the GIL); decoder preference **PyTurboJPEG → cv2.imdecode (default; wheel-bundled libjpeg-turbo,
+  no system libs) → Pillow**. Read/decode/write overlap (1-deep prefetch reader). Measured
+  expansion **~11.2×** (37 GB JPEG → 415 GB raw for the 142-slide/50 GB subset; full ~1400
+  slides → ~4 TB raw). `final_setup{,_mini}.sh` STEP 2 CALLS `preprocess.sh` (verify-or-redo
+  failsafe; `PREP_SKIP_CONTAINER=1`), so a GPU job on a fresh checkout still works with no
+  separate prep run — but running preprocess.sh standalone on a CPU node offloads all CPU work.
+- **Train (GPU): raw bins stay on Lustre; the SSD is a small STREAMING CACHE.** The full ~4 TB
+  raw can't fit the node-local SSD (nor can the ~365 GB of JPEG tars — SSD on the dev node is only
+  ~159 GB). So `data.py` `_iter_raw` keeps bins on Lustre and, per worker, copies the **next**
+  slide's `.bin` onto the SSD (`PFM_RAWCACHE_DIR`, depth-1 prefetch overlapping the current
+  slide's reads), **memmaps** it (`np.array(mm[i])` copies each 192 KB patch into DRAM), then
+  **evicts** it — a bounded ~2-bin window per worker, never the whole set. Self-limiting: if the
+  SSD is near-full, that slide is memmapped straight from Lustre (still zero-decode). STEP 4 sets
+  `PFM_PATCH_DIR=$TCGA/patches_raw` (Lustre) + `PFM_RAWCACHE_DIR=$L_SCRATCH/pfm_rawcache`; no bulk
+  copy. Batch size / stride / sharding unchanged (still one patch yielded at a time, DataLoader
+  batches). Extraction is a **single pass** (each patch read once → mean-pooled), so total Lustre
+  read = dataset size once.
 
 ## Gotchas
 
